@@ -1,53 +1,76 @@
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_ollama import OllamaLLM
+from langchain_chroma import Chroma
+from langchain_ollama import ChatOllama
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_classic.chains import RetrievalQA
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 
 # 1. Load ข้อมูลจาก PDF
 loader = PyPDFLoader("sample.pdf")
-data = loader.load()
+docs = loader.load()
 
 # 2. Split ข้อความออกเป็นส่วนย่อย
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-chunks = text_splitter.split_documents(data)
+splits = text_splitter.split_documents(docs)
 
-# 3. สร้าง Vector Database ด้วย Embedding ที่เก่งภาษาไทยขึ้น
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-vector_db = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory="./chroma_db")
-
-# 4. สร้าง Prompt Template เพื่อบังคับ AI
-prompt_template = """
-คุณคือผู้ช่วย AI ที่เชี่ยวชาญในการอ่านและสรุปเอกสาร จงใช้ข้อมูล(Context)ที่ให้มาเพื่อตอบคำถามอย่างละเอียด 
-หากข้อมูลไม่มีคำตอบ ให้ตอบว่า "ไม่พบข้อมูลในเอกสาร" ห้ามแต่งเรื่องขึ้นมาเองเด็ดขาด
-จงตอบเป็นภาษาไทยเท่านั้น
-
-ข้อมูล (Context): {context}
-
-คำถาม (Question): {question}
-
-คำตอบ:"""
-PROMPT = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-
-# 5. ตั้งค่า Retrieval QA Chain
-llm = OllamaLLM(model="llama3")
-rag_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",
-    retriever=vector_db.as_retriever(search_kwargs={"k": 5}),
-    chain_type_kwargs={"prompt": PROMPT},
-    return_source_documents=True
+# 3. สร้าง Vector Database
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+vector_db = Chroma.from_documents(
+    documents=splits,
+    embedding=embeddings,
+    persist_directory="./chroma_db"
 )
 
-# 6. เริ่มถามคำถาม
-query = "หน่วยกิตรวมตลอดหลักสูตรคือกี่หน่วยกิต"
+# 4. กำหนดตัวโมเดล
+llm = ChatOllama(model="llama3", temperature=0)
+
+# 5. สร้าง Prompt
+system_prompt = (
+    "คุณคือผู้ช่วย AI ที่เชี่ยวชาญในการอ่านและสรุปเอกสาร "
+    "จงใช้ข้อมูล (Context) ที่ให้มาเพื่อตอบคำถามอย่างละเอียด "
+    "หากข้อมูลไม่มีคำตอบ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสาร' ห้ามแต่งเรื่องขึ้นมาเองเด็ดขาด "
+    "จงตอบเป็นภาษาไทยเท่านั้น"
+    "\n\n"
+    "{context}"
+)
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_prompt),
+    ("human", "{input}"),
+])
+
+# 6. Helper function แปลง docs → string สำหรับใส่ใน Prompt
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+# 7. สร้าง LCEL Chain แบบ LangChain 1.x
+retriever = vector_db.as_retriever(search_kwargs={"k": 5})
+
+# ขั้นที่ 1: ดึง context docs และ input มาพร้อมกัน
+rag_chain = RunnableParallel(
+    context=retriever,
+    input=RunnablePassthrough()
+).assign(
+    # ขั้นที่ 2: นำ context + input เข้า prompt → llm → parse output
+    answer=lambda x: (
+        prompt | llm | StrOutputParser()
+    ).invoke({
+        "context": format_docs(x["context"]),
+        "input": x["input"]
+    })
+)
+
+# 8. ถามคำถาม
+query = "จำนวนหน่วยกิตรวมตลอดหลักสูตรคือกี่หน่วยกิต"
 response = rag_chain.invoke(query)
 
 print("\n--- คำตอบของ AI ---")
-print(response["result"])
+print(response["answer"])
 
-# print("\n--- ข้อมูลจาก PDF ที่ AI ดึงมาอ่าน (Debug) ---")
-# for i, doc in enumerate(response["source_documents"]):
-#     print(f"ส่วนที่ {i+1}: {doc.page_content[:200]}...")
+print("\n--- ข้อมูลอ้างอิง (Source) ---")
+for doc in response["context"]:
+    print(f"- หน้าที่ {doc.metadata.get('page', 'N/A')}")
