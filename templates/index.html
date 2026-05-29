@@ -33,10 +33,14 @@
                 <h5 class="m-0 fw-bold text-dark">Sessions Tab</h5>
             </div>
             
-            <button id="upload-btn" class="btn btn-secondary rounded-pill mb-3 shadow-sm py-2" onclick="pickFile()" disabled>
+            <button id="upload-btn" class="btn btn-secondary rounded-pill mb-3 shadow-sm py-2" onclick="pickFile(false)" disabled>
                 ⏳ รอระบบเชื่อมต่อ...
             </button>
             
+            <button id="append-button" class="btn btn-primary rounded-pill mb-2 shadow-sm py-2" onclick="pickFile(true)" disabled>
+                ➕ Add File to current Session
+            </button>
+
             <div id="session-list" class="flex-grow-1 overflow-auto pe-2"></div>
         </div>
 
@@ -88,30 +92,39 @@
             sessions.forEach(s => {
                 const btn = document.createElement('div');
                 btn.className = `p-3 mb-2 rounded session-item ${s.id === currentSessionId ? 'session-active' : 'bg-white border'}`;
-                btn.innerHTML = `📄 ${s.filename}`;
+                const filesLabel = s.filenames.join(', ')
+                btn.innerHTML = `📄 ${filename}`;
                 btn.onclick = () => selectSession(s.id);
                 listDiv.appendChild(btn);
             });
         }
 
-        async function pickFile() {
+        async function pickFile(isAppend = false) {
+            let targetSessionId = isAppend ? currentSessionId : null;
+            if (isAppend && !currentSessionId) return;
+
             try {
                 const path = await window.pywebview.api.pick_file();
                 if (!path) return;
                 
-                document.getElementById('chat-box').innerHTML = ''; 
+                if (!isAppend) {
+                    document.getElementById('chat-box').innerHTML = '';
+                }
                 appendMsg('ai', '⏳ กำลังวิเคราะห์เนื้อหาเอกสาร กรุณารอสักครู่...');
                 
                 const res = await fetch('/api/load', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({path})
+                    body: JSON.stringify({ path: path, session_id: targetSessionId })
                 });
                 
                 const data = await res.json();
                 if (data.ok) {
                     currentSessionId = data.session_id;
                     checkStatus(data.session_id);
+                } else {
+                    alert(data.error);
+                    loadSessions();
                 }
             } catch (err) {
                 console.error("Upload Error: ", err);
@@ -180,6 +193,7 @@
             }
         }
 
+        // -------------------------------------
         function appendMsg(role, text, pages = [], chunks = []) {
             const box = document.getElementById('chat-box');
             const div = document.createElement('div');
@@ -205,14 +219,14 @@
                     
                     let chunksHtml = chunks.map(c => 
                         `<div class="border rounded p-2 mb-2 text-dark" style="font-size: 0.75rem; background: #f8f9fa; border-left: 3px solid #0d6efd !important; text-align: left;">
-                            <b class="text-primary">หน้า ${c.page}:</b> ${c.content}
+                        <b class="text-primary">[ไฟล์: ${c.filename}] หน้า ${c.page}:</b> ${c.content}
                         </div>`
                     ).join('');
 
                     previewDiv.innerHTML = `
                         <details>
                             <summary style="cursor: pointer; font-size: 0.8rem; color: #0d6efd; font-weight: 500; outline: none; margin-top: 5px; user-select: none;">
-                                🔍 ดูเนื้อหาต้นฉบับ
+                                🔍 ดูเนื้อหาต้นฉบับแยกตามไฟล์
                             </summary>
                             <div class="mt-2 text-muted">${chunksHtml}</div>
                         </details>
@@ -228,6 +242,7 @@
             document.getElementById('query-input').disabled = false;
             document.getElementById('send-btn').disabled = false;
             document.getElementById('export-btn').style.display = 'block';
+            document.getElementById('append-btn').style.display = 'block';
             document.getElementById('query-input').focus();
         }
 

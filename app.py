@@ -41,28 +41,45 @@ def build_rag(file_path: str, session_id: str):
             raise ValueError(f"ระบบยังไม่รองรับไฟล์ประเภท {ext}")
         
         docs = loader.load()
+        filename = os.path.basename(file_path)
+
+        # ฝังชื่อไฟล์ลงใน metadata ของเอกสารก่อนแบ่ง chunks
+        for d in docs:
+            d.metadata["filename"] = filename
+
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         splits = splitter.split_documents(docs)
 
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         PERSIST_DIR = os.path.join(os.getcwd(), "chroma_db")
-        
-        vector_db = Chroma.from_documents(
-            documents=splits, 
-            embedding=embeddings,
-            collection_name=f"temp_{session_id}",
-            persist_directory=PERSIST_DIR
-        )
+
+        # ตรวจสอบว่าถ้ามี Retriever อยู่แล้วให้แอดเพิ่มเข้าไป ห้ามสร้างทับ
+        if sessions[session_id]["retriever"] is not None:
+            vector_db = Chroma(
+                collection_name=f"temp_{session_id}",
+                embedding_function=embeddings,
+                persist_directory=PERSIST_DIR
+            )
+            vector_db.add_documents(splits)
+        else:
+            vector_db = Chroma.from_documents(
+                documents=splits, 
+                embedding=embeddings,
+                collection_name=f"temp_{session_id}",
+                persist_directory=PERSIST_DIR
+            )
 
         llm = ChatOllama(model="llama3", temperature=0)
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "คุณคือผู้ช่วย AI จงตอบคำถามจากข้อมูลที่ให้มาเป็นภาษาไทยเท่านั้น\n\nContext: {context}"),
+            ("system", "คุณคือผู้ช่วย AI จงตอบคำถามจากข้อมูลที่ให้มาเป็นภาษาไทยเท่านั้น\n"
+                       "ข้อมูลด้านล่างนี้อาจมาจากเอกสารหลายชุด ให้สังเกตป้ายระบุ [ไฟล์: ...] อย่างละเอียด "
+                       "หากผู้ใช้สั่งให้เปรียบเทียบ สรุปข้อเหมือน หรือข้อต่าง ให้ระบุข้อมูลแจกแจงแยกตามรายชื่อไฟล์อย่างชัดเจน\n\nContext: {context}"),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{question}")
         ])
 
-        retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+        retriever = vector_db.as_retriever(search_kwargs={"k": 6})
         base_chain = prompt | llm | StrOutputParser()
         
         sessions[session_id]["retriever"] = retriever
@@ -77,20 +94,29 @@ def index():
 
 @app.route("/api/load", methods=["POST"])
 def api_load():
-    path = request.get_json().get("path")
+    data = request.get_json()
+    path = data.get("path")
+    session_id = data.get("session_id")
+
     if not path or not os.path.exists(path):
         return jsonify({"ok": False, "error": "ไฟล์ไม่ถูกต้อง"}), 400
     
     filename = os.path.basename(path)
-    session_id = uuid.uuid4().hex
-    
-    sessions[session_id] = {
-        "status": "idle",
-        "filename": filename,
-        "chat_history": [],
-        "retriever": None,
-        "base_chain": None
-    }
+
+    if session_id and session_id in sessions:
+        if filename in sessions[session_id]["filenames"]:
+            return jsonify({"ok": False, "error": "ไฟล์นี้ถูกเพิ่มไปแล้ว"}), 400
+        sessions[session_id]["filenames"].append(filename)
+    else:
+        session_id = uuid.uuid4().hex
+
+        sessions[session_id] = {
+            "status": "idle",
+            "filename": [filename],
+            "chat_history": [],
+            "retriever": None,
+            "base_chain": None
+        }
     
     threading.Thread(target=build_rag, args=(path, session_id), daemon=True).start()
     return jsonify({"ok": True, "session_id": session_id, "filename": filename})
@@ -135,7 +161,14 @@ def api_ask():
     
     try:
         docs = session_data["retriever"].invoke(query)
-        context = "\n\n".join(d.page_content for d in docs)
+
+        context_items = []
+        for d in docs:
+            fname = d.metadata("filename", "ไม่ระบุไฟล์")
+            page = d.metadata("page", 0) + 1
+            context_items.append(f"[ข้อมูลจาก ไฟล์: {fname} หน้าที่: {page}]:\n{d.page_content}")
+
+        context = "\n\n".join(context_items)
         
         answer = session_data["base_chain"].invoke({
             "context": context,
@@ -144,7 +177,13 @@ def api_ask():
         })
         
         pages = sorted(list(set(d.metadata.get("page", 0) + 1 for d in docs)))
-        chunks = [{"content": d.page_content, "page": d.metadata.get("page", 0) + 1} for d in docs]
+
+        #เก็บ metadata ชื่อไฟล์แนบกลับไปแสดงผลฝั่งหน้าบ้านด้วย
+        chunks = [{
+            "content": d.page_content,
+            "page": d.metadata.get("page", 0) + 1,
+            "filename": d.metadata.get("filename", "ไม่ระบุไฟล์")
+            } for d in docs]
         
         session_data["chat_history"].extend([
             HumanMessage(content=query),
@@ -159,19 +198,16 @@ class API:
     def pick_file(self):
         if not webview.windows: return None
         window = webview.windows[0] # รับประกันว่าชี้ไปที่หน้าต่างหลักแน่นอน
-        
         file_types = ('Support Documents (*.pdf;*.txt;*.docx)', 'All files (*.*)')
         result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types)
         return result[0] if result else None
     
     def save_chat(self, session_id):
-        if session_id not in sessions:
-            return False
-        
+        if session_id not in sessions: return False
         history = sessions[session_id]["chat_history"]
-        filename = sessions[session_id]["filename"]
+        filename_str = ", ".join(sessions[session_id]["filename"])
         
-        export_text = f"=== รายงานการสนทนาจากเอกสาร: {filename} ===\n"
+        export_text = f"=== รายงานการสนทนาจากเอกสาร: {filename_str} ===\n"
         export_text += "=" * 50 + "\n\n"
         
         for msg in history:
@@ -179,8 +215,7 @@ class API:
             export_text += f"[{role}]:\n{msg.content}\n"
             if role == "AI ASSISTANT" and "pages" in msg.additional_kwargs:
                 pages = msg.additional_kwargs["pages"]
-                if pages:
-                    export_text += f"(อ้างอิงจากหน้า: {', '.join(map(str, pages))})\n"
+                if pages: export_text += f"(อ้างอิงจากหน้า: {', '.join(map(str, pages))})\n"
             export_text += "-" * 30 + "\n\n"
         
         if not webview.windows: return False
