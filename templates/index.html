@@ -3,25 +3,132 @@
 <head>
     <meta charset="UTF-8">
     <title>Local RAG Assistant</title>
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    
     <style>
-        body { background: #f4f7f6; height: 100vh; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
-        ::-webkit-scrollbar { width: 6px; }
+        body { 
+            background: #f0f2f5; 
+            height: 100vh; 
+            overflow: hidden; 
+            font-family: 'Prompt', sans-serif; 
+        }
+        
+        /* Scrollbar Customization */
+        ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #ced4da; border-radius: 10px; }
-        ::-webkit-scrollbar-thumb:hover { background: #adb5bd; }
-        #chat-box { flex: 1; overflow-y: auto; padding: 30px 10%; background: transparent; }
-        .msg { margin-bottom: 20px; padding: 12px 18px; border-radius: 18px; max-width: 75%; position: relative; box-shadow: 0 2px 5px rgba(0,0,0,0.04); line-height: 1.5; }
-        .user { background: #0d6efd; color: white; align-self: flex-end; margin-left: auto; border-bottom-right-radius: 4px; }
-        .ai { background: #ffffff; color: #212529; border: 1px solid #e9ecef; border-bottom-left-radius: 4px; }
-        .sidebar { background: #ffffff; box-shadow: 2px 0 10px rgba(0,0,0,0.03); z-index: 10; }
-        .session-item { cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
-        .session-item:hover { background-color: #f8f9fa; border-color: #e9ecef; }
-        .session-active { background-color: #ebf3ff; color: #0d6efd; border-color: #0d6efd !important; font-weight: 500; }
-        .chat-input-area { background: #ffffff; padding: 20px 10%; box-shadow: 0 -5px 15px rgba(0,0,0,0.02); z-index: 10; }
-        .custom-input-group { border-radius: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); overflow: hidden; border: 1px solid #dee2e6; }
-        .custom-input-group input { border: none; padding: 15px 25px; box-shadow: none !important; }
-        .custom-input-group button { border-radius: 0 30px 30px 0; padding: 0 25px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Sidebar */
+        .sidebar { 
+            background: #ffffff; 
+            box-shadow: 2px 0 15px rgba(0,0,0,0.04); 
+            z-index: 10; 
+        }
+        .session-item { 
+            cursor: pointer; 
+            transition: all 0.2s ease-in-out; 
+            border: 1px solid #f1f5f9; 
+            font-size: 0.9rem;
+            color: #475569;
+        }
+        .session-item:hover { 
+            background-color: #f8fafc; 
+            border-color: #e2e8f0; 
+            transform: translateY(-1px);
+        }
+        .session-active { 
+            background-color: #eff6ff !important; 
+            color: #2563eb !important; 
+            border-color: #bfdbfe !important; 
+            font-weight: 500; 
+            box-shadow: 0 2px 5px rgba(37, 99, 235, 0.05);
+        }
+
+        /* Chat Area */
+        #chat-box { 
+            flex: 1; 
+            overflow-y: auto; 
+            padding: 40px 10%; 
+            background: #f0f2f5; 
+        }
+        .msg { 
+            margin-bottom: 24px; 
+            padding: 16px 20px; 
+            border-radius: 18px; 
+            max-width: 80%; 
+            position: relative; 
+            line-height: 1.6; 
+            font-size: 0.95rem;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        
+        .user { 
+            background: #0d6efd; 
+            color: #ffffff; 
+            align-self: flex-end; 
+            margin-left: auto; 
+            border-bottom-right-radius: 4px; 
+        }
+        .ai { 
+            background: #ffffff; 
+            color: #334155; 
+            border: 1px solid #e2e8f0; 
+            border-bottom-left-radius: 4px; 
+            margin-right: auto;
+        }
+
+        /* Chat Input */
+        .chat-input-area { 
+            background: #ffffff; 
+            padding: 20px 10%; 
+            border-top: 1px solid #e2e8f0;
+            z-index: 10; 
+        }
+        .custom-input-group { 
+            border-radius: 24px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05); 
+            overflow: hidden; 
+            border: 1px solid #cbd5e1; 
+            transition: all 0.3s;
+        }
+        .custom-input-group:focus-within {
+            border-color: #0d6efd;
+            box-shadow: 0 4px 15px rgba(13, 110, 253, 0.1); 
+        }
+        .custom-input-group input { 
+            border: none; 
+            padding: 16px 24px; 
+            box-shadow: none !important; 
+            background: transparent;
+        }
+        .custom-input-group button { 
+            border-radius: 0 24px 24px 0; 
+            padding: 0 28px; 
+            font-weight: 500;
+        }
+
+        /* Source References Accordion */
+        details.source-details {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 15px;
+        }
+        details.source-details summary {
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: #475569;
+            font-weight: 500;
+            user-select: none;
+            outline: none;
+        }
+        details.source-details summary:hover { color: #0d6efd; }
     </style>
 </head>
 <body>
@@ -29,39 +136,45 @@
     <div class="container-fluid h-100 p-0 d-flex">
         <div class="d-flex flex-column border-end sidebar p-3" style="width: 320px;">
             <div class="d-flex align-items-center mb-4 mt-2 px-2">
-                <span style="font-size: 1.5rem; margin-right: 10px;">📚</span>
-                <h5 class="m-0 fw-bold text-dark">Sessions Tab</h5>
+                <i class="bi bi-box-seam text-primary fs-3 me-2"></i>
+                <h5 class="m-0 fw-bold text-dark">RAG Assistant</h5>
             </div>
             
-            <button id="upload-btn" class="btn btn-secondary rounded-pill mb-3 shadow-sm py-2" onclick="pickFile(false)" disabled>
-                ⏳ รอระบบเชื่อมต่อ...
+            <button id="upload-btn" class="btn btn-secondary rounded-pill mb-2 shadow-sm py-2 fw-medium" onclick="pickFile(false)" disabled>
+                <i class="bi bi-hourglass-split me-1"></i> รอระบบเชื่อมต่อ...
             </button>
             
-            <button id="append-button" class="btn btn-primary rounded-pill mb-2 shadow-sm py-2" onclick="pickFile(true)" disabled>
-                ➕ Add File to current Session
+            <button id="append-btn" class="btn btn-outline-primary rounded-pill mb-3 shadow-sm py-2 fw-medium" onclick="pickFile(true)" style="display: none;">
+                <i class="bi bi-plus-circle me-1"></i> เพิ่มไฟล์ในห้องเดิม
             </button>
 
+            <h6 class="text-muted fs-6 mt-2 mb-3 px-2"><i class="bi bi-clock-history me-1"></i> ประวัติการสนทนา</h6>
             <div id="session-list" class="flex-grow-1 overflow-auto pe-2"></div>
         </div>
 
         <div class="d-flex flex-column flex-grow-1 position-relative">
-            <nav class="navbar bg-white border-bottom px-4 py-3 d-flex justify-content-between" style="box-shadow: 0 2px 10px rgba(0,0,0,0.02); z-index: 5;">
-                <span class="navbar-brand mb-0 h1 fs-5 text-secondary" id="current-doc-title">
-                    <span class="badge bg-secondary me-2">Empty</span> ยังไม่ได้เลือกเอกสาร
+            <nav class="navbar bg-white border-bottom px-4 py-3 d-flex justify-content-between" style="z-index: 5;">
+                <span class="navbar-brand mb-0 h1 fs-6 text-secondary d-flex align-items-center" id="current-doc-title">
+                    <span class="badge bg-secondary me-2 rounded-pill px-3 py-2 fw-normal">ยังไม่ได้เลือกเอกสาร</span>
                 </span>
-                <button id="export-btn" class="btn btn-outline-secondary btn-sm rounded-pill px-3" onclick="exportChat()" style="display: none;">
-                    📥 Export Chat (.txt)
+                <button id="export-btn" class="btn btn-outline-secondary btn-sm rounded-pill px-3 py-2 fw-medium" onclick="exportChat()" style="display: none;">
+                    <i class="bi bi-download me-1"></i> ส่งออกแชท (.txt)
                 </button>
             </nav>
 
             <div id="chat-box" class="d-flex flex-column">
-                <div class="msg ai">👋 สวัสดี กรุณาอัปโหลดไฟล์เอกสารเพื่อพูดคุย</div>
+                <div class="msg ai shadow-sm">
+                    <i class="bi bi-robot fs-5 me-2 text-primary"></i> 
+                    สวัสดีครับ! กรุณาอัปโหลดไฟล์เอกสาร (PDF, TXT, WORD) ทางเมนูด้านซ้ายเพื่อเริ่มการสนทนา
+                </div>
             </div>
 
             <div class="chat-input-area">
                 <div class="input-group custom-input-group">
-                    <input type="text" id="query-input" class="form-control" placeholder="พิมพ์คำถามเกี่ยวกับเอกสาร..." disabled>
-                    <button class="btn btn-primary" id="send-btn" onclick="send()" disabled>Send</button>
+                    <input type="text" id="query-input" class="form-control" placeholder="พิมพ์คำถามที่ต้องการค้นหาจากเอกสาร..." disabled>
+                    <button class="btn btn-primary" id="send-btn" onclick="send()" disabled>
+                        <i class="bi bi-send-fill"></i>
+                    </button>
                 </div>
             </div>
         </div>
@@ -70,20 +183,23 @@
     <script>
         let currentSessionId = null;
 
-        // รอจนกว่า Pywebview ฝั่งหลังบ้านจะพร้อม 100% ค่อยเปิดปุ่ม Upload
         window.addEventListener('pywebviewready', function() {
             const btn = document.getElementById('upload-btn');
             btn.disabled = false;
-            btn.className = "btn btn-primary rounded-pill mb-3 shadow-sm py-2";
-            btn.innerText = "+ Upload [PDF, TXT, WORD]";
+            btn.className = "btn btn-primary rounded-pill mb-2 shadow-sm py-2 fw-medium";
+            btn.innerHTML = "<i class='bi bi-cloud-upload me-1'></i> สร้างห้องสนทนาใหม่";
         });
 
         window.onload = loadSessions;
 
         async function loadSessions() {
-            const res = await fetch('/api/sessions');
-            const data = await res.json();
-            if (data.ok) renderSessionList(data.sessions);
+            try {
+                const res = await fetch('/api/sessions');
+                const data = await res.json();
+                if (data.ok) renderSessionList(data.sessions);
+            } catch (err) {
+                console.error("Failed to load sessions", err);
+            }
         }
 
         function renderSessionList(sessions) {
@@ -91,9 +207,13 @@
             listDiv.innerHTML = '';
             sessions.forEach(s => {
                 const btn = document.createElement('div');
-                btn.className = `p-3 mb-2 rounded session-item ${s.id === currentSessionId ? 'session-active' : 'bg-white border'}`;
-                const filesLabel = s.filenames.join(', ')
-                btn.innerHTML = `📄 ${filename}`;
+                btn.className = `p-3 mb-2 rounded session-item ${s.id === currentSessionId ? 'session-active' : 'bg-white'}`;
+                
+                // แก้บั๊กตรงนี้: เปลี่ยน filename เป็น filesLabel
+                const filesLabel = s.filenames.join(', ');
+                btn.innerHTML = `<i class="bi bi-file-earmark-text me-2"></i> ${filesLabel}`;
+                btn.title = filesLabel; // เผื่อชื่อยาวเกินไป ให้เอาเมาส์ชี้ดูได้
+                
                 btn.onclick = () => selectSession(s.id);
                 listDiv.appendChild(btn);
             });
@@ -110,7 +230,7 @@
                 if (!isAppend) {
                     document.getElementById('chat-box').innerHTML = '';
                 }
-                appendMsg('ai', '⏳ กำลังวิเคราะห์เนื้อหาเอกสาร กรุณารอสักครู่...');
+                appendMsg('ai', 'กำลังวิเคราะห์เนื้อหาเอกสารและสร้างฐานข้อมูล กรุณารอสักครู่... <i class="bi bi-hourglass-split text-warning"></i>');
                 
                 const res = await fetch('/api/load', {
                     method: 'POST',
@@ -137,14 +257,19 @@
             const data = await res.json();
 
             if (data.status === 'ready') {
-                document.getElementById('current-doc-title').innerHTML = `<b>📑 File:</b> <span class="text-primary">${data.filename}</span>`;
+                // แก้บั๊กตรงนี้: ใช้ data.filenames.join
+                const fileNames = data.filenames.join(', ');
+                document.getElementById('current-doc-title').innerHTML = `
+                    <span class="badge bg-primary me-2 rounded-pill px-3 py-2 fw-normal">ใช้งานอยู่</span> 
+                    <span class="text-dark fw-medium text-truncate" style="max-width: 500px;" title="${fileNames}">${fileNames}</span>
+                `;
                 enableInput();
                 document.getElementById('chat-box').innerHTML = '';
-                appendMsg('ai', '✨ วิเคราะห์เอกสารสำเร็จ! พร้อมตอบคำถามแล้วครับ');
+                appendMsg('ai', 'วิเคราะห์เอกสารสำเร็จ! พร้อมตอบคำถามของคุณแล้วครับ 🎉');
                 loadSessions(); 
             } else if (data.status.startsWith('error')) {
                 document.getElementById('chat-box').innerHTML = '';
-                appendMsg('ai', '❌ เกิดข้อผิดพลาด: ' + data.status);
+                appendMsg('ai', 'เกิดข้อผิดพลาดในการประมวลผล: ' + data.status);
             } else {
                 setTimeout(() => checkStatus(sessionId), 1000);
             }
@@ -158,12 +283,18 @@
             const data = await res.json();
             
             if (data.ok) {
-                document.getElementById('current-doc-title').innerHTML = `<b>📑 File:</b> <span class="text-primary">${data.filename}</span>`;
+                // แก้บั๊กตรงนี้: ใช้ data.filenames.join
+                const fileNames = data.filenames.join(', ');
+                document.getElementById('current-doc-title').innerHTML = `
+                    <span class="badge bg-primary me-2 rounded-pill px-3 py-2 fw-normal">ใช้งานอยู่</span> 
+                    <span class="text-dark fw-medium text-truncate" style="max-width: 500px;" title="${fileNames}">${fileNames}</span>
+                `;
+                
                 const chatBox = document.getElementById('chat-box');
                 chatBox.innerHTML = ''; 
                 
                 if (data.history.length === 0) {
-                    appendMsg('ai', '✨ พร้อมตอบคำถามแล้วครับ');
+                    appendMsg('ai', 'กลับเข้าสู่ห้องสนทนา พร้อมตอบคำถามแล้วครับ ✨');
                 } else {
                     data.history.forEach(msg => appendMsg(msg.role, msg.content, msg.pages, msg.chunks));
                 }
@@ -178,71 +309,82 @@
 
             appendMsg('user', query);
             input.value = '';
-
-            const res = await fetch('/api/ask', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: query, session_id: currentSessionId })
-            });
-            const data = await res.json();
             
-            if(data.ok) {
-                appendMsg('ai', data.answer, data.pages, data.chunks);
-            } else {
-                appendMsg('ai', 'เกิดข้อผิดพลาด: ' + data.error);
+            // Disable input while generating
+            input.disabled = true;
+            document.getElementById('send-btn').disabled = true;
+
+            try {
+                const res = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ query: query, session_id: currentSessionId })
+                });
+                const data = await res.json();
+                
+                if(data.ok) {
+                    appendMsg('ai', data.answer, data.pages, data.chunks);
+                } else {
+                    appendMsg('ai', 'เกิดข้อผิดพลาด: ' + data.error);
+                }
+            } catch (error) {
+                appendMsg('ai', 'เกิดข้อผิดพลาดในการเชื่อมต่อกับเซิร์ฟเวอร์');
+            } finally {
+                input.disabled = false;
+                document.getElementById('send-btn').disabled = false;
+                input.focus();
             }
         }
 
-        // -------------------------------------
         function appendMsg(role, text, pages = [], chunks = []) {
             const box = document.getElementById('chat-box');
             const div = document.createElement('div');
             div.className = `msg ${role}`;
             
+            // Format ข้อความให้รองรับการขึ้นบรรทัดใหม่
             const textSpan = document.createElement('span');
-            textSpan.innerText = text;
+            textSpan.innerHTML = text.replace(/\n/g, '<br>');
             div.appendChild(textSpan);
 
             if (role === 'ai') {
                 if (pages && pages.length > 0) {
                     const sourceDiv = document.createElement('div');
-                    sourceDiv.className = 'mt-3 pt-2 border-top border-light-subtle text-muted';
-                    sourceDiv.style.fontSize = '0.78rem';
+                    sourceDiv.className = 'mt-3 pt-3 border-top text-secondary';
+                    sourceDiv.style.fontSize = '0.85rem';
                     const badges = pages.map(p => `<span class="badge bg-light text-dark border me-1">หน้า ${p}</span>`).join('');
-                    sourceDiv.innerHTML = `📚 <b>อ้างอิงจาก:</b> ${badges}`;
+                    sourceDiv.innerHTML = `<i class="bi bi-journal-bookmark-fill text-primary"></i> <b>อ้างอิงจาก:</b> ${badges}`;
                     div.appendChild(sourceDiv);
                 }
 
                 if (chunks && chunks.length > 0) {
                     const previewDiv = document.createElement('div');
-                    previewDiv.className = 'mt-2';
                     
                     let chunksHtml = chunks.map(c => 
-                        `<div class="border rounded p-2 mb-2 text-dark" style="font-size: 0.75rem; background: #f8f9fa; border-left: 3px solid #0d6efd !important; text-align: left;">
-                        <b class="text-primary">[ไฟล์: ${c.filename}] หน้า ${c.page}:</b> ${c.content}
+                        `<div class="border rounded p-3 mb-2 text-dark bg-white" style="font-size: 0.8rem; border-left: 4px solid #0d6efd !important;">
+                            <div class="fw-bold text-primary mb-1"><i class="bi bi-file-earmark-text"></i> ${c.filename} (หน้า ${c.page})</div>
+                            <div class="text-muted" style="line-height: 1.5;">${c.content.replace(/\n/g, '<br>')}</div>
                         </div>`
                     ).join('');
 
                     previewDiv.innerHTML = `
-                        <details>
-                            <summary style="cursor: pointer; font-size: 0.8rem; color: #0d6efd; font-weight: 500; outline: none; margin-top: 5px; user-select: none;">
-                                🔍 ดูเนื้อหาต้นฉบับแยกตามไฟล์
-                            </summary>
-                            <div class="mt-2 text-muted">${chunksHtml}</div>
+                        <details class="source-details">
+                            <summary><i class="bi bi-search me-1"></i> ดูข้อความต้นฉบับที่ถูกใช้ (Source Chunks)</summary>
+                            <div class="mt-3">${chunksHtml}</div>
                         </details>
                     `;
                     div.appendChild(previewDiv);
                 }
             }
             box.appendChild(div);
-            box.scrollTop = box.scrollHeight;
+            // Scroll to bottom
+            setTimeout(() => { box.scrollTop = box.scrollHeight; }, 50);
         }
 
         function enableInput() {
             document.getElementById('query-input').disabled = false;
             document.getElementById('send-btn').disabled = false;
             document.getElementById('export-btn').style.display = 'block';
-            document.getElementById('append-btn').style.display = 'block';
+            document.getElementById('append-btn').style.display = 'block'; // แก้ไข ID ให้ตรงกัน
             document.getElementById('query-input').focus();
         }
 
@@ -250,7 +392,7 @@
             if (!currentSessionId) return;
             try {
                 const success = await window.pywebview.api.save_chat(currentSessionId);
-                if (success) alert("บันทึกไฟล์สำเร็จแล้ว!");
+                if (success) alert("บันทึกประวัติการสนทนาสำเร็จแล้ว!");
             } catch (err) {
                 console.error("Export Error:", err);
             }

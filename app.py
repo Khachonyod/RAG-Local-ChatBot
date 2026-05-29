@@ -1,10 +1,11 @@
-import threading
-import webview
-from flask import Flask, request, jsonify, render_template
 import os
 import sys
 import uuid
+import threading
+import webview
+from flask import Flask, request, jsonify, render_template
 
+# LangChain Imports
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -15,19 +16,23 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
 
 def get_resource_path(relative_path):
-    """ฟังก์ชันช่วยหา Path ที่แท้จริงเวลาแปลงเป็น .exe"""
+    """จัดการ Path ให้รองรับการ Build ด้วย PyInstaller"""
     try:
-        # PyInstaller จะเก็บ Path จำลองไว้ใน _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        # ถ้าไม่ได้รันเป็น .exe ให้ใช้ Path ปัจจุบัน
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
 app = Flask(__name__, template_folder=get_resource_path('templates'))
 sessions = {}
 
+def get_page_number(metadata):
+    """Helper Function ป้องกัน Error กรณีไฟล์(เช่น .txt) ไม่มี metadata หน้า"""
+    page = metadata.get("page")
+    return int(page) + 1 if page is not None else 1
+
 def build_rag(file_path: str, session_id: str):
+    """ฟังก์ชันเบื้องหลังสำหรับประมวลผลไฟล์และสร้าง Vector DB"""
     sessions[session_id]["status"] = "loading"
     try:
         ext = os.path.splitext(file_path)[1].lower()
@@ -43,7 +48,6 @@ def build_rag(file_path: str, session_id: str):
         docs = loader.load()
         filename = os.path.basename(file_path)
 
-        # ฝังชื่อไฟล์ลงใน metadata ของเอกสารก่อนแบ่ง chunks
         for d in docs:
             d.metadata["filename"] = filename
 
@@ -53,7 +57,6 @@ def build_rag(file_path: str, session_id: str):
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         PERSIST_DIR = os.path.join(os.getcwd(), "chroma_db")
 
-        # ตรวจสอบว่าถ้ามี Retriever อยู่แล้วให้แอดเพิ่มเข้าไป ห้ามสร้างทับ
         if sessions[session_id]["retriever"] is not None:
             vector_db = Chroma(
                 collection_name=f"temp_{session_id}",
@@ -88,6 +91,8 @@ def build_rag(file_path: str, session_id: str):
     except Exception as e:
         sessions[session_id]["status"] = f"error: {str(e)}"
 
+# ==================== FLASK ROUTES ====================
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -109,21 +114,20 @@ def api_load():
         sessions[session_id]["filenames"].append(filename)
     else:
         session_id = uuid.uuid4().hex
-
         sessions[session_id] = {
             "status": "idle",
-            "filename": [filename],
+            "filenames": [filename],
             "chat_history": [],
             "retriever": None,
             "base_chain": None
         }
     
     threading.Thread(target=build_rag, args=(path, session_id), daemon=True).start()
-    return jsonify({"ok": True, "session_id": session_id, "filename": filename})
+    return jsonify({"ok": True, "session_id": session_id, "filenames": sessions[session_id]["filenames"]})
 
 @app.route("/api/sessions", methods=["GET"])
 def api_sessions():
-    session_list = [{"id": sid, "filename": data["filename"]} for sid, data in sessions.items()]
+    session_list = [{"id": sid, "filenames": data["filenames"]} for sid, data in sessions.items()]
     return jsonify({"ok": True, "sessions": session_list})
 
 @app.route("/api/history/<session_id>", methods=["GET"])
@@ -141,7 +145,7 @@ def api_history(session_id):
     return jsonify({
         "ok": True, 
         "history": history, 
-        "filename": sessions[session_id]["filename"],
+        "filenames": sessions[session_id]["filenames"],
         "status": sessions[session_id]["status"]
     })
 
@@ -164,8 +168,8 @@ def api_ask():
 
         context_items = []
         for d in docs:
-            fname = d.metadata("filename", "ไม่ระบุไฟล์")
-            page = d.metadata("page", 0) + 1
+            fname = d.metadata.get("filename", "ไม่ระบุไฟล์")
+            page = get_page_number(d.metadata)
             context_items.append(f"[ข้อมูลจาก ไฟล์: {fname} หน้าที่: {page}]:\n{d.page_content}")
 
         context = "\n\n".join(context_items)
@@ -176,14 +180,13 @@ def api_ask():
             "chat_history": session_data["chat_history"]
         })
         
-        pages = sorted(list(set(d.metadata.get("page", 0) + 1 for d in docs)))
+        pages = sorted(list(set(get_page_number(d.metadata) for d in docs)))
 
-        #เก็บ metadata ชื่อไฟล์แนบกลับไปแสดงผลฝั่งหน้าบ้านด้วย
         chunks = [{
             "content": d.page_content,
-            "page": d.metadata.get("page", 0) + 1,
+            "page": get_page_number(d.metadata),
             "filename": d.metadata.get("filename", "ไม่ระบุไฟล์")
-            } for d in docs]
+        } for d in docs]
         
         session_data["chat_history"].extend([
             HumanMessage(content=query),
@@ -194,10 +197,12 @@ def api_ask():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+# ==================== PYWEBVIEW API ====================
+
 class API:
     def pick_file(self):
         if not webview.windows: return None
-        window = webview.windows[0] # รับประกันว่าชี้ไปที่หน้าต่างหลักแน่นอน
+        window = webview.windows[0] 
         file_types = ('Support Documents (*.pdf;*.txt;*.docx)', 'All files (*.*)')
         result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types)
         return result[0] if result else None
@@ -205,7 +210,7 @@ class API:
     def save_chat(self, session_id):
         if session_id not in sessions: return False
         history = sessions[session_id]["chat_history"]
-        filename_str = ", ".join(sessions[session_id]["filename"])
+        filename_str = ", ".join(sessions[session_id]["filenames"])
         
         export_text = f"=== รายงานการสนทนาจากเอกสาร: {filename_str} ===\n"
         export_text += "=" * 50 + "\n\n"
@@ -228,7 +233,6 @@ class API:
         )
 
         if save_path:
-            # ดึง string ออกมาจาก tuple อย่างปลอดภัย
             actual_path = save_path[0] if isinstance(save_path, (tuple, list)) else save_path
             try:
                 with open(actual_path, 'w', encoding='utf-8') as f:
@@ -243,4 +247,4 @@ if __name__ == "__main__":
     api = API()
     threading.Thread(target=lambda: app.run(port=5050), daemon=True).start()
     webview.create_window("Local RAG Assistant", "http://127.0.0.1:5050", js_api=api)
-    webview.start() # เอา debug ออกเพื่อให้แอปทำงานสมูทที่สุด
+    webview.start()
