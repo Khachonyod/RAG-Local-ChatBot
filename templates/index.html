@@ -143,6 +143,11 @@
             <button id="upload-btn" class="btn btn-secondary rounded-pill mb-2 shadow-sm py-2 fw-medium" onclick="pickFile(false)" disabled>
                 <i class="bi bi-hourglass-split me-1"></i> รอระบบเชื่อมต่อ...
             </button>
+
+            <!-- เพิ่มปุ่มสแกนโฟลเดอร์ -->
+            <button id="upload-folder-btn" class="btn btn-secondary rounded-pill mb-2 shadow-sm py-2 fw-medium" onclick="pickFolder(false)" style="display: none;">
+                <i class="bi bi-folder-plus me-1"></i> สแกนโฟลเดอร์
+            </button>
             
             <button id="append-btn" class="btn btn-outline-primary rounded-pill mb-3 shadow-sm py-2 fw-medium" onclick="pickFile(true)" style="display: none;">
                 <i class="bi bi-plus-circle me-1"></i> เพิ่มไฟล์ในห้องเดิม
@@ -165,7 +170,7 @@
             <div id="chat-box" class="d-flex flex-column">
                 <div class="msg ai shadow-sm">
                     <i class="bi bi-robot fs-5 me-2 text-primary"></i> 
-                    สวัสดีครับ! กรุณาอัปโหลดไฟล์เอกสาร (PDF, TXT, WORD) ทางเมนูด้านซ้ายเพื่อเริ่มการสนทนา
+                    สวัสดีครับ! กรุณาอัปโหลดไฟล์เอกสาร หรือ สแกนโฟลเดอร์ (PDF, TXT, WORD, EXCEL) ทางเมนูด้านซ้ายเพื่อเริ่มการสนทนา
                 </div>
             </div>
 
@@ -187,7 +192,12 @@
             const btn = document.getElementById('upload-btn');
             btn.disabled = false;
             btn.className = "btn btn-primary rounded-pill mb-2 shadow-sm py-2 fw-medium";
-            btn.innerHTML = "<i class='bi bi-cloud-upload me-1'></i> สร้างห้องสนทนาใหม่";
+            btn.innerHTML = "<i class='bi bi-file-earmark-plus me-1'></i> สร้างห้องใหม่ (เลือกไฟล์)";
+
+            const folderBtn = document.getElementById('upload-folder-btn');
+            folderBtn.disabled = false;
+            folderBtn.style.display = 'block';
+            folderBtn.className = "btn btn-info text-white rounded-pill mb-2 shadow-sm py-2 fw-medium";
         });
 
         window.onload = loadSessions;
@@ -209,10 +219,9 @@
                 const btn = document.createElement('div');
                 btn.className = `p-3 mb-2 rounded session-item ${s.id === currentSessionId ? 'session-active' : 'bg-white'}`;
                 
-                // แก้บั๊กตรงนี้: เปลี่ยน filename เป็น filesLabel
                 const filesLabel = s.filenames.join(', ');
                 btn.innerHTML = `<i class="bi bi-file-earmark-text me-2"></i> ${filesLabel}`;
-                btn.title = filesLabel; // เผื่อชื่อยาวเกินไป ให้เอาเมาส์ชี้ดูได้
+                btn.title = filesLabel; 
                 
                 btn.onclick = () => selectSession(s.id);
                 listDiv.appendChild(btn);
@@ -252,16 +261,52 @@
             }
         }
 
+        // ฟังก์ชันใหม่สำหรับการสแกนโฟลเดอร์
+        async function pickFolder(isAppend = false) {
+            let targetSessionId = isAppend ? currentSessionId : null;
+            if (isAppend && !currentSessionId) return;
+
+            try {
+                const path = await window.pywebview.api.pick_folder();
+                if (!path) return;
+                
+                if (!isAppend) {
+                    document.getElementById('chat-box').innerHTML = '';
+                }
+                appendMsg('ai', 'กำลังสแกนโฟลเดอร์และประมวลผลไฟล์ทั้งหมด กรุณารอสักครู่... ระบบอาจใช้เวลาสักพักขึ้นอยู่กับจำนวนไฟล์ <i class="bi bi-hourglass-split text-warning"></i>');
+                
+                const res = await fetch('/api/load', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ path: path, session_id: targetSessionId })
+                });
+                
+                const data = await res.json();
+                if (data.ok) {
+                    currentSessionId = data.session_id;
+                    checkStatus(data.session_id);
+                } else {
+                    alert(data.error);
+                    loadSessions();
+                }
+            } catch (err) {
+                console.error("Folder Upload Error: ", err);
+                alert("เกิดข้อผิดพลาดในการโหลดหน้าต่างเลือกโฟลเดอร์");
+            }
+        }
+
         async function checkStatus(sessionId) {
             const res = await fetch(`/api/history/${sessionId}`);
             const data = await res.json();
 
             if (data.status === 'ready') {
-                // แก้บั๊กตรงนี้: ใช้ data.filenames.join
-                const fileNames = data.filenames.join(', ');
+                let fileNames = data.filenames.join(', ');
+                if(data.filenames.length > 3) {
+                    fileNames = `${data.filenames.length} เอกสารในระบบ`;
+                }
                 document.getElementById('current-doc-title').innerHTML = `
                     <span class="badge bg-primary me-2 rounded-pill px-3 py-2 fw-normal">ใช้งานอยู่</span> 
-                    <span class="text-dark fw-medium text-truncate" style="max-width: 500px;" title="${fileNames}">${fileNames}</span>
+                    <span class="text-dark fw-medium text-truncate" style="max-width: 500px;" title="${data.filenames.join(', ')}">${fileNames}</span>
                 `;
                 enableInput();
                 document.getElementById('chat-box').innerHTML = '';
@@ -283,11 +328,13 @@
             const data = await res.json();
             
             if (data.ok) {
-                // แก้บั๊กตรงนี้: ใช้ data.filenames.join
-                const fileNames = data.filenames.join(', ');
+                let fileNames = data.filenames.join(', ');
+                if(data.filenames.length > 3) {
+                    fileNames = `${data.filenames.length} เอกสารในระบบ`;
+                }
                 document.getElementById('current-doc-title').innerHTML = `
                     <span class="badge bg-primary me-2 rounded-pill px-3 py-2 fw-normal">ใช้งานอยู่</span> 
-                    <span class="text-dark fw-medium text-truncate" style="max-width: 500px;" title="${fileNames}">${fileNames}</span>
+                    <span class="text-dark fw-medium text-truncate" style="max-width: 500px;" title="${data.filenames.join(', ')}">${fileNames}</span>
                 `;
                 
                 const chatBox = document.getElementById('chat-box');
@@ -310,7 +357,6 @@
             appendMsg('user', query);
             input.value = '';
             
-            // Disable input while generating
             input.disabled = true;
             document.getElementById('send-btn').disabled = true;
 
@@ -341,7 +387,6 @@
             const div = document.createElement('div');
             div.className = `msg ${role}`;
             
-            // Format ข้อความให้รองรับการขึ้นบรรทัดใหม่
             const textSpan = document.createElement('span');
             textSpan.innerHTML = text.replace(/\n/g, '<br>');
             div.appendChild(textSpan);
@@ -376,7 +421,6 @@
                 }
             }
             box.appendChild(div);
-            // Scroll to bottom
             setTimeout(() => { box.scrollTop = box.scrollHeight; }, 50);
         }
 
@@ -384,7 +428,7 @@
             document.getElementById('query-input').disabled = false;
             document.getElementById('send-btn').disabled = false;
             document.getElementById('export-btn').style.display = 'block';
-            document.getElementById('append-btn').style.display = 'block'; // แก้ไข ID ให้ตรงกัน
+            document.getElementById('append-btn').style.display = 'block'; 
             document.getElementById('query-input').focus();
         }
 

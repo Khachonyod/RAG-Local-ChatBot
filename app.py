@@ -6,7 +6,7 @@ import webview
 from flask import Flask, request, jsonify, render_template
 
 # LangChain Imports
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, UnstructuredExcelLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_ollama import ChatOllama
@@ -31,28 +31,34 @@ def get_page_number(metadata):
     page = metadata.get("page")
     return int(page) + 1 if page is not None else 1
 
-def build_rag(file_path: str, session_id: str):
+def build_rag_multiple(file_paths: list, session_id: str):
     """ฟังก์ชันเบื้องหลังสำหรับประมวลผลไฟล์และสร้าง Vector DB"""
     sessions[session_id]["status"] = "loading"
     try:
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext == '.pdf':
-            loader = PyPDFLoader(file_path)
-        elif ext == '.txt':
-            loader = TextLoader(file_path, encoding='utf-8')
-        elif ext in ['.doc', '.docx']:
-            loader = Docx2txtLoader(file_path)
-        else:
-            raise ValueError(f"ระบบยังไม่รองรับไฟล์ประเภท {ext}")
-        
-        docs = loader.load()
-        filename = os.path.basename(file_path)
+        all_docs = []
+        for file_path in file_paths:
+            ext = os.path.splitext(file_path)[1].lower()
+            try:
+                if ext == '.pdf': loader = PyPDFLoader(file_path)
+                elif ext == '.txt': loader = TextLoader(file_path, encoding='utf-8')
+                elif ext in ['.doc','.docx']: loader = Docx2txtLoader(file_path)
+                elif ext in ['.xls','.xlsx']: loader = UnstructuredExcelLoader(file_path)
+                else: continue
 
-        for d in docs:
-            d.metadata["filename"] = filename
+                docs = loader.load()
+                filename = os.path.basename(file_path)
+                for d in docs:
+                    d.metadata["filename"] = filename
+                all_docs.extend(docs)
+            except Exception as e:
+                print(f"ข้ามไฟล์{file_path} เนื่องจากError: {str(e)}")
+                continue
+        
+        if not all_docs:
+            raise ValueError("ไม่สามารถอ่านเนื้อหาจากไฟล์ใดๆ ได้เลย")
 
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        splits = splitter.split_documents(docs)
+        splits = splitter.split_documents(all_docs)
 
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         PERSIST_DIR = os.path.join(os.getcwd(), "chroma_db")
@@ -106,23 +112,42 @@ def api_load():
     if not path or not os.path.exists(path):
         return jsonify({"ok": False, "error": "ไฟล์ไม่ถูกต้อง"}), 400
     
+    supported_ext = ['.pdf','.doc','.docx','.txt','.xls','.xlsx']
+    files_to_process = []
+
+    if os.path.isdir(path):
+        for root, dir, files in os.walk(path):
+            for file in files:
+                if os.path.splitext(file)[1].lower() in supported_ext:
+                    files_to_process.append(os.path.join(root, file))
+    else:
+        if os.path.splitext(path)[1].lower() in supported_ext:
+            files_to_process.append(path)
+
+    if not files_to_process:
+        return jsonify({"ok": False, "error": "ไม่พบไฟล์เอกสารที่รับรอง"}), 400
+    
+    new_filenames = [os.path.basename(f) for f in files_to_process]
+    
     filename = os.path.basename(path)
 
     if session_id and session_id in sessions:
-        if filename in sessions[session_id]["filenames"]:
-            return jsonify({"ok": False, "error": "ไฟล์นี้ถูกเพิ่มไปแล้ว"}), 400
-        sessions[session_id]["filenames"].append(filename)
+
+        new_files_to_add = [f for f in new_filenames if f not in sessions[session_id]["filenames"]]
+        if not new_files_to_add:
+            return jsonify({"ok": False, "error": "ไฟล์ทั้งหมดในนี้ถูกเพิ่มไปแล้ว"}), 400
+        sessions[session_id]["filenames"].extend(new_files_to_add)
     else:
         session_id = uuid.uuid4().hex
         sessions[session_id] = {
             "status": "idle",
-            "filenames": [filename],
+            "filenames": new_filenames,
             "chat_history": [],
             "retriever": None,
             "base_chain": None
         }
-    
-    threading.Thread(target=build_rag, args=(path, session_id), daemon=True).start()
+
+    threading.Thread(target=build_rag_multiple, args=(files_to_process, session_id), daemon=True).start()
     return jsonify({"ok": True, "session_id": session_id, "filenames": sessions[session_id]["filenames"]})
 
 @app.route("/api/sessions", methods=["GET"])
@@ -203,10 +228,16 @@ class API:
     def pick_file(self):
         if not webview.windows: return None
         window = webview.windows[0] 
-        file_types = ('Support Documents (*.pdf;*.txt;*.docx)', 'All files (*.*)')
+        file_types = ('Support Documents (*.pdf;*.txt;*.docx;*.xls;*.xlsx)', 'All files (*.*)')
         result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types)
         return result[0] if result else None
     
+    def pick_folder(self):
+        if not webview.windows: return None
+        window = webview.windows[0]
+        result = window.create_file_dialog(webview.FileDialog.FOLDER)
+        return result[0] if result else None
+
     def save_chat(self, session_id):
         if session_id not in sessions: return False
         history = sessions[session_id]["chat_history"]
