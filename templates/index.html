@@ -143,11 +143,6 @@
             <button id="upload-btn" class="btn btn-secondary rounded-pill mb-2 shadow-sm py-2 fw-medium" onclick="pickFile(false)" disabled>
                 <i class="bi bi-hourglass-split me-1"></i> รอระบบเชื่อมต่อ...
             </button>
-
-            <!-- เพิ่มปุ่มสแกนโฟลเดอร์ -->
-            <button id="upload-folder-btn" class="btn btn-secondary rounded-pill mb-2 shadow-sm py-2 fw-medium" onclick="pickFolder(false)" style="display: none;">
-                <i class="bi bi-folder-plus me-1"></i> สแกนโฟลเดอร์
-            </button>
             
             <button id="append-btn" class="btn btn-outline-primary rounded-pill mb-3 shadow-sm py-2 fw-medium" onclick="pickFile(true)" style="display: none;">
                 <i class="bi bi-plus-circle me-1"></i> เพิ่มไฟล์ในห้องเดิม
@@ -193,11 +188,6 @@
             btn.disabled = false;
             btn.className = "btn btn-primary rounded-pill mb-2 shadow-sm py-2 fw-medium";
             btn.innerHTML = "<i class='bi bi-file-earmark-plus me-1'></i> สร้างห้องใหม่ (เลือกไฟล์)";
-
-            const folderBtn = document.getElementById('upload-folder-btn');
-            folderBtn.disabled = false;
-            folderBtn.style.display = 'block';
-            folderBtn.className = "btn btn-info text-white rounded-pill mb-2 shadow-sm py-2 fw-medium";
         });
 
         window.onload = loadSessions;
@@ -233,8 +223,8 @@
             if (isAppend && !currentSessionId) return;
 
             try {
-                const path = await window.pywebview.api.pick_file();
-                if (!path) return;
+                const paths = await window.pywebview.api.pick_file();
+                if (!paths || paths.length === 0) return;
                 
                 if (!isAppend) {
                     document.getElementById('chat-box').innerHTML = '';
@@ -244,7 +234,7 @@
                 const res = await fetch('/api/load', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ path: path, session_id: targetSessionId })
+                    body: JSON.stringify({ paths: paths, session_id: targetSessionId })
                 });
                 
                 const data = await res.json();
@@ -258,40 +248,6 @@
             } catch (err) {
                 console.error("Upload Error: ", err);
                 alert("เกิดข้อผิดพลาดในการโหลดหน้าต่างเลือกไฟล์");
-            }
-        }
-
-        // ฟังก์ชันใหม่สำหรับการสแกนโฟลเดอร์
-        async function pickFolder(isAppend = false) {
-            let targetSessionId = isAppend ? currentSessionId : null;
-            if (isAppend && !currentSessionId) return;
-
-            try {
-                const path = await window.pywebview.api.pick_folder();
-                if (!path) return;
-                
-                if (!isAppend) {
-                    document.getElementById('chat-box').innerHTML = '';
-                }
-                appendMsg('ai', 'กำลังสแกนโฟลเดอร์และประมวลผลไฟล์ทั้งหมด กรุณารอสักครู่... ระบบอาจใช้เวลาสักพักขึ้นอยู่กับจำนวนไฟล์ <i class="bi bi-hourglass-split text-warning"></i>');
-                
-                const res = await fetch('/api/load', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ path: path, session_id: targetSessionId })
-                });
-                
-                const data = await res.json();
-                if (data.ok) {
-                    currentSessionId = data.session_id;
-                    checkStatus(data.session_id);
-                } else {
-                    alert(data.error);
-                    loadSessions();
-                }
-            } catch (err) {
-                console.error("Folder Upload Error: ", err);
-                alert("เกิดข้อผิดพลาดในการโหลดหน้าต่างเลือกโฟลเดอร์");
             }
         }
 

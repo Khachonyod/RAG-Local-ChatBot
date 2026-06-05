@@ -106,38 +106,34 @@ def index():
 @app.route("/api/load", methods=["POST"])
 def api_load():
     data = request.get_json()
-    path = data.get("path")
+    paths = data.get("paths")
     session_id = data.get("session_id")
 
-    if not path or not os.path.exists(path):
+    if not paths or not isinstance(paths, (list, tuple)):
         return jsonify({"ok": False, "error": "ไฟล์ไม่ถูกต้อง"}), 400
     
     supported_ext = ['.pdf','.doc','.docx','.txt','.xls','.xlsx']
     files_to_process = []
 
-    if os.path.isdir(path):
-        for root, dir, files in os.walk(path):
-            for file in files:
-                if os.path.splitext(file)[1].lower() in supported_ext:
-                    files_to_process.append(os.path.join(root, file))
-    else:
-        if os.path.splitext(path)[1].lower() in supported_ext:
-            files_to_process.append(path)
+    for file_path in paths:
+        if os.path.exists(file_path) and os.path.splitext(file_path)[1].lower() in supported_ext:
+            files_to_process.append(file_path)
 
     if not files_to_process:
-        return jsonify({"ok": False, "error": "ไม่พบไฟล์เอกสารที่รับรอง"}), 400
-    
-    new_filenames = [os.path.basename(f) for f in files_to_process]
-    
-    filename = os.path.basename(path)
+        return jsonify({"ok": False, "error": "ไม่พบไฟล์เอกสารทีรองรับจากที่เลือกมา"}), 400
 
     if session_id and session_id in sessions:
+        new_files_to_process = [f for f in files_to_process if os.path.basename(f) not in sessions[session_id]["filenaems"]]
 
-        new_files_to_add = [f for f in new_filenames if f not in sessions[session_id]["filenames"]]
-        if not new_files_to_add:
-            return jsonify({"ok": False, "error": "ไฟล์ทั้งหมดในนี้ถูกเพิ่มไปแล้ว"}), 400
-        sessions[session_id]["filenames"].extend(new_files_to_add)
+        if not new_files_to_process:
+            return jsonify({"ok": False, "error": "ไฟล์ทั้งหมดที่เลือกถูกเพิ่มไปแล้ว"}), 400
+        
+        new_filenames = [os.path.basename(f) for f in new_files_to_process]
+        sessions[session_id]["filenames"].extend(new_filenames)
+
+        files_to_process = new_files_to_process
     else:
+        new_filenames = [os.path.basename(f) for f in files_to_process]
         session_id = uuid.uuid4().hex
         sessions[session_id] = {
             "status": "idle",
@@ -229,14 +225,8 @@ class API:
         if not webview.windows: return None
         window = webview.windows[0] 
         file_types = ('Support Documents (*.pdf;*.txt;*.docx;*.xls;*.xlsx)', 'All files (*.*)')
-        result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types)
-        return result[0] if result else None
-    
-    def pick_folder(self):
-        if not webview.windows: return None
-        window = webview.windows[0]
-        result = window.create_file_dialog(webview.FileDialog.FOLDER)
-        return result[0] if result else None
+        result = window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types, allow_multiple=True)
+        return result if result else None
 
     def save_chat(self, session_id):
         if session_id not in sessions: return False
