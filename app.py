@@ -3,6 +3,8 @@ import sys
 import uuid
 import threading
 import webview
+import pytesseract
+from pdf2image import convert_from_path
 from flask import Flask, request, jsonify, render_template
 
 # LangChain Imports
@@ -14,6 +16,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.documents import Document
+
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 def get_resource_path(relative_path):
     """จัดการ Path ให้รองรับการ Build ด้วย PyInstaller"""
@@ -39,13 +44,41 @@ def build_rag_multiple(file_paths: list, session_id: str):
         for file_path in file_paths:
             ext = os.path.splitext(file_path)[1].lower()
             try:
-                if ext == '.pdf': loader = PyPDFLoader(file_path)
-                elif ext == '.txt': loader = TextLoader(file_path, encoding='utf-8')
-                elif ext in ['.doc','.docx']: loader = Docx2txtLoader(file_path)
-                elif ext in ['.xls','.xlsx']: loader = UnstructuredExcelLoader(file_path)
+                docs = []
+                if ext == '.pdf':
+                    loader = PyPDFLoader(file_path)
+                    docs = loader.load()
+
+                    total_text = "".join([d.page_content for d in docs]).strip()
+
+                    if len(total_text) < 50:
+                        print(f"[OCR] ตรวจพบไฟล์ PDF สแกน: {os.path.basename(file_path)} กำลังประมวลผลรูปภาพ...")
+
+                        images = convert_from_path(file_path)
+                        ocr_docs = []
+
+                        for i, img in enumerate(images):
+                            text = pytesseract.image_to_string(img, lang='tha+eng')
+
+                            ocr_docs.append(Document(
+                                page_content=text,
+                                metadata={"source": file_path, "page": i}
+                            ))
+                        docs = ocr_docs
+
+                elif ext == '.txt':
+                    loader = TextLoader(file_path, encoding='utf-8')
+                    docs = loader.load()
+                elif ext in ['.doc','.docx']:
+                    loader = Docx2txtLoader(file_path)
+                    docs = loader.load()
+                elif ext in ['.xls','.xlsx']:
+                    loader = UnstructuredExcelLoader(file_path)
+                    docs = loader.load()
                 else: continue
 
-                docs = loader.load()
+                if not docs: continue
+                
                 filename = os.path.basename(file_path)
                 for d in docs:
                     d.metadata["filename"] = filename
@@ -123,7 +156,7 @@ def api_load():
         return jsonify({"ok": False, "error": "ไม่พบไฟล์เอกสารทีรองรับจากที่เลือกมา"}), 400
 
     if session_id and session_id in sessions:
-        new_files_to_process = [f for f in files_to_process if os.path.basename(f) not in sessions[session_id]["filenaems"]]
+        new_files_to_process = [f for f in files_to_process if os.path.basename(f) not in sessions[session_id]["filenames"]]
 
         if not new_files_to_process:
             return jsonify({"ok": False, "error": "ไฟล์ทั้งหมดที่เลือกถูกเพิ่มไปแล้ว"}), 400
