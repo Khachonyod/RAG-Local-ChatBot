@@ -4,6 +4,7 @@ import uuid
 import threading
 import webview
 import pytesseract
+import json
 from pdf2image import convert_from_path
 from flask import Flask, request, jsonify, render_template
 
@@ -15,7 +16,7 @@ from langchain_ollama import ChatOllama
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 from langchain_core.documents import Document
 
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -30,6 +31,58 @@ def get_resource_path(relative_path):
 
 app = Flask(__name__, template_folder=get_resource_path('templates'))
 sessions = {}
+SESSION_FILE = "sessions.json"
+
+def init_chain_for_session(session_id):
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    PERSIST_DIR = os.path.join(os.getcwd(), "chroma_db")
+
+    vector_db = Chroma(
+        collection_name=f"temp_{session_id}",
+        embedding_function=embeddings,
+        persist_directory=PERSIST_DIR
+    )
+    llm = ChatOllama(model="llama3", temperature=0)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "คุณคือผู้ช่วย AI จงตอบคำถามจากข้อมูลที่ให้มาเป็นภาษาไทยเท่านั้น\n"
+                   "ข้อมูลด้านล่างนี้อาจมาจากเอกสารหลายชุด ให้สังเกตป้ายระบุ [ไฟล์: ...] อย่างละเอียด "
+                   "หากผู้ใช้สั่งให้เปรียบเทียบ สรุปข้อเหมือน หรือข้อต่าง ให้ระบุข้อมูลแจกแจงแยกตามรายชื่อไฟล์อย่างชัดเจน\n\nContext: {context}"),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}")
+    ])
+
+    sessions[session_id]["retriever"] = vector_db.as_retriever(search_kwargs={"k": 6})
+    sessions[session_id]["base_chain"] = prompt | llm | StrOutputParser()
+
+def save_sessions():
+    data_to_save = {}
+    for sid, sdata in sessions.items():
+        if sdata["status"] == "ready":
+            data_to_save[sid] = {
+                "filenames": sdata["filenames"],
+                "chat_history": messages_to_dict(sdata["chat_history"])
+            }
+    with open (SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data_to_save, f, ensure_ascii=False, indent=4)
+
+def load_sessions():
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for sid, sdata in data.items():
+                    sessions[sid] = {
+                        "status": "ready",
+                        "filenames": sdata["filenames"],
+                        "chat_history": messages_from_dict(sdata["chat_history"]),
+                        "retriever": None,
+                        "base_chain": None
+                    }
+
+                    init_chain_for_session(sid)
+        except Exception as e:
+            print(f"ไม่สามารถโหลดประวัติเดิมได้: {e}")
 
 def get_page_number(metadata):
     """Helper Function ป้องกัน Error กรณีไฟล์(เช่น .txt) ไม่มี metadata หน้า"""
@@ -54,7 +107,7 @@ def build_rag_multiple(file_paths: list, session_id: str):
                     if len(total_text) < 50:
                         print(f"[OCR] ตรวจพบไฟล์ PDF สแกน: {os.path.basename(file_path)} กำลังประมวลผลรูปภาพ...")
 
-                        images = convert_from_path(file_path)
+                        images = convert_from_path(file_path, poppler_path=r'C:\poppler\Library\bin')
                         ocr_docs = []
 
                         for i, img in enumerate(images):
@@ -127,6 +180,9 @@ def build_rag_multiple(file_paths: list, session_id: str):
         sessions[session_id]["retriever"] = retriever
         sessions[session_id]["base_chain"] = base_chain
         sessions[session_id]["status"] = "ready"
+
+        save_sessions()
+
     except Exception as e:
         sessions[session_id]["status"] = f"error: {str(e)}"
 
@@ -208,6 +264,7 @@ def api_ask():
     data = request.get_json()
     session_id = data.get("session_id")
     query = data.get("query")
+    model_name = data.get("model", "llama3")
 
     if not session_id or session_id not in sessions:
         return jsonify({"ok": False, "error": "ไม่พบ Session กรุณาอัปโหลดไฟล์ใหม่"}), 400
@@ -227,8 +284,22 @@ def api_ask():
             context_items.append(f"[ข้อมูลจาก ไฟล์: {fname} หน้าที่: {page}]:\n{d.page_content}")
 
         context = "\n\n".join(context_items)
+
+        # --- สร้าง AI Chain ตามโมเดลที่เลือก ---
+        llm = ChatOllama(model=model_name, temperature=0)
+
+        print(f"DEBUG: กำลังใช้งานโมเดล -> {model_name}")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "คุณคือผู้ช่วย AI จงตอบคำถามจากข้อมูลที่ให้มาเป็นภาษาไทยเท่านั้น\n"
+                       "ข้อมูลด้านล่างนี้อาจมาจากเอกสารหลายชุด ให้สังเกตป้ายระบุ [ไฟล์: ...] อย่างละเอียด "
+                       "หากผู้ใช้สั่งให้เปรียบเทียบ สรุปข้อเหมือน หรือข้อต่าง ให้ระบุข้อมูลแจกแจงแยกตามรายชื่อไฟล์อย่างชัดเจน\n\nContext: {context}"),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}")
+        ])
+        dynamic_chain = prompt | llm | StrOutputParser()
+
         
-        answer = session_data["base_chain"].invoke({
+        answer = dynamic_chain.invoke({
             "context": context,
             "question": query,
             "chat_history": session_data["chat_history"]
@@ -246,6 +317,8 @@ def api_ask():
             HumanMessage(content=query),
             AIMessage(content=answer, additional_kwargs={"pages": pages, "chunks": chunks})
         ])
+
+        save_sessions()
         
         return jsonify({"ok": True, "answer": answer, "pages": pages, "chunks": chunks})
     except Exception as e:
@@ -298,6 +371,7 @@ class API:
         return False
 
 if __name__ == "__main__":
+    load_sessions()
     api = API()
     threading.Thread(target=lambda: app.run(port=5050), daemon=True).start()
     webview.create_window("Local RAG Assistant", "http://127.0.0.1:5050", js_api=api)

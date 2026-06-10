@@ -153,10 +153,18 @@
         </div>
 
         <div class="d-flex flex-column flex-grow-1 position-relative">
-            <nav class="navbar bg-white border-bottom px-4 py-3 d-flex justify-content-between" style="z-index: 5;">
+            <nav class="navbar bg-white border-bottom px-4 py-3 d-flex" style="z-index: 5;">
                 <span class="navbar-brand mb-0 h1 fs-6 text-secondary d-flex align-items-center" id="current-doc-title">
                     <span class="badge bg-secondary me-2 rounded-pill px-3 py-2 fw-normal">ยังไม่ได้เลือกเอกสาร</span>
                 </span>
+
+                <div class="d-flex align-items-center ms-auto">
+                    <select id="model-selector" class="form-select me-2 rounded-pill px-3 pe-5 border-primary text-primary fw-medium" style="width: auto; display: none;">
+                        <option value="llama3">Llama 3</option>
+                        <option value="qwen2.5:7b">Qwen 2.5</option>
+                    </select>
+                </div>
+
                 <button id="export-btn" class="btn btn-outline-secondary btn-sm rounded-pill px-3 py-2 fw-medium" onclick="exportChat()" style="display: none;">
                     <i class="bi bi-download me-1"></i> ส่งออกแชท (.txt)
                 </button>
@@ -308,6 +316,8 @@
         async function send() {
             const input = document.getElementById('query-input');
             const query = input.value.trim();
+            const selectedModel = document.getElementById('model-selector').value;
+
             if (!query || !currentSessionId) return;
 
             appendMsg('user', query);
@@ -320,7 +330,7 @@
                 const res = await fetch('/api/ask', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ query: query, session_id: currentSessionId })
+                    body: JSON.stringify({ query: query, session_id: currentSessionId, model: selectedModel })
                 });
                 const data = await res.json();
                 
@@ -385,6 +395,7 @@
             document.getElementById('send-btn').disabled = false;
             document.getElementById('export-btn').style.display = 'block';
             document.getElementById('append-btn').style.display = 'block'; 
+            document.getElementById('model-selector').style.display = 'block';
             document.getElementById('query-input').focus();
         }
 
