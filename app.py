@@ -192,6 +192,34 @@ def build_rag_multiple(file_paths: list, session_id: str):
 def index():
     return render_template("index.html")
 
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+def api_delete_sessions(session_id):
+    if session_id not in sessions:
+        return jsonify({"ok": False,"error": "ไม่พบ Session"}), 404
+    
+    try:
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        PERSIST_DIR = os.path.join(os.getcwd(), "chroma_db")
+
+        vector_db = Chroma(
+            collection_name=f"temp_{session_id}",
+            embedding_function=embeddings,
+            persist_directory=PERSIST_DIR
+        )
+
+        try:
+            vector_db.delete_collection()
+        except Exception as e:
+            print(f"Warning: ไม่พบข้อมูล collection (อาจถูกลบไปแล้ว) - {e}")
+
+        del sessions[session_id]
+
+        save_sessions()
+
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route("/api/load", methods=["POST"])
 def api_load():
     data = request.get_json()

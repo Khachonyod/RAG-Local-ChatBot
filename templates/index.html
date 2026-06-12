@@ -173,7 +173,7 @@
             <div id="chat-box" class="d-flex flex-column">
                 <div class="msg ai shadow-sm">
                     <i class="bi bi-robot fs-5 me-2 text-primary"></i> 
-                    สวัสดีครับ! กรุณาอัปโหลดไฟล์เอกสาร หรือ สแกนโฟลเดอร์ (PDF, TXT, WORD, EXCEL) ทางเมนูด้านซ้ายเพื่อเริ่มการสนทนา
+                    กรุณาอัปโหลดไฟล์เอกสาร ทางเมนูด้านซ้ายเพื่อเริ่มการสนทนา
                 </div>
             </div>
 
@@ -200,6 +200,39 @@
 
         window.onload = loadSessions;
 
+        async function deleteSession(sessionId, event) {
+            event.stopPropagation();
+
+            if (!confirm("คุณแน่ใจหรือไม่? ประวัติการแชทและฐานข้อมูลเอกสารของห้องนี้จะถูกลบอย่างถาวร")) {
+                return;
+            }
+
+            try {
+                const res = await fetch(`/api/sessions/${sessionId}`, {method: 'DELETE' });
+                const data = await res.json();
+
+                if (data.ok) {
+                    if (typeof currentSessionId !== 'undefined' && currentSessionId === sessionId) {
+                        currentSessionId = null;
+                        document.getElementById('chat-box').innerHTML = '';
+                        document.getElementById('current-doc-title').innerHTML = '<span class="badge bg-secondary me-2 rounded-pill px-3 py-2 fw-normal">ยังไม่ได้เลือกเอกสาร</span>';
+
+                        document.getElementById('query-input').disabled = true;
+                        document.getElementById('send-btn').disabled = true;
+                        if(document.getElementById('model-selector')) document.getElementById('model-selector').style.display = 'none';
+                        if(document.getElementById('export-btn')) document.getElementById('export-btn').style.display = 'none';
+                    }
+
+                    loadSessions();
+                } else {
+                    alert("เกิดข้อผิดพลาดในการลบ: " + data.error);
+                }
+            } catch (error) {
+                console.error(error);
+                alert("ไม่สามารถติดต่อเซิฟเวอร์ได้");
+            }
+         }
+
         async function loadSessions() {
             try {
                 const res = await fetch('/api/sessions');
@@ -215,11 +248,20 @@
             listDiv.innerHTML = '';
             sessions.forEach(s => {
                 const btn = document.createElement('div');
-                btn.className = `p-3 mb-2 rounded session-item ${s.id === currentSessionId ? 'session-active' : 'bg-white'}`;
+                btn.className = `p-3 mb-2 rounded session-item d-flex justify-content-between align-items-center ${s.id === currentSessionId ? 'session-active' : 'bg-white'}`;
                 
                 const filesLabel = s.filenames.join(', ');
-                btn.innerHTML = `<i class="bi bi-file-earmark-text me-2"></i> ${filesLabel}`;
-                btn.title = filesLabel; 
+
+                btn.innerHTML = `
+                    <div class="text-truncate" style="max-width: 80%;" title="${filesLabel}">
+                        <i class="bi bi-file-earmark-text me-2"></i> ${filesLabel}
+                    </div>
+                    
+                    <button class="btn btn-sm text-danger border-0 px-2 py-1" onclick="deleteSession('${s.id}', event)" title="ลบห้องนี้">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                `;
+                // btn.title = filesLabel; 
                 
                 btn.onclick = () => selectSession(s.id);
                 listDiv.appendChild(btn);
