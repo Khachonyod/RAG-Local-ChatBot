@@ -48,12 +48,24 @@ function appendMsg(role, text, pages = [], chunks = []) {
     }
 
     if (role === 'ai' && chunks.length) {
-        const chunksHtml = chunks.map(c => 
-            `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
-                <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page})</div>
+        const chunksHtml = chunks.map(c => {
+            let scoreHtml = '';
+
+            if (c.score !== undefined) {
+                let badgeColor = 'bg-secondary';
+                if (c.score < 1.0) badgeColor = 'bg-success';
+                else if (c.score < 1.3) badgeColor = 'bg-warning text-dark';
+                else badgeColor = 'bg-danger';
+
+                scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;" title="L2 Distance (ยิ่งน้อยยิ่งแปลว่าคำถามตรงกับเนื้อหา)">Distance: ${c.score}</span>`;
+            }
+
+            return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
+                <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page} ${scoreHtml})</div>
                 <div class="text-muted">${c.content.replace(/\n/g, '<br>')}</div>
             </div>`
-        ).join('');
+        }).join('');
+
         div.innerHTML += `<details class="source-details"><summary><i class="bi bi-search me-1"></i> ดูข้อความต้นฉบับ</summary><div class="mt-2">${chunksHtml}</div></details>`;
     }
     box.appendChild(div);
@@ -143,14 +155,48 @@ async function send() {
     finally { uiState(true); }
 }
 
+let sesionToDelete = null;
+let deleteModalInstance = null;
+
+document.addEventListener("DOMContentLoaded", () => {
+    const confirmBtn = document.getElementById('confirm-delete-btn')
+    if (confirmBtn) {
+        confirmBtn.addEventListener('click', async () => {
+            if (!sessionToDelete) return;
+
+            confirmBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>กำลังลบ...';
+            confirmBtn.disabled = true;
+
+            try {
+                const res = await fetch(`/api/sessions/${sessionToDelete}`, {method: 'DELETE'});
+                const data = await res.json()
+
+                if (data.ok) {
+                    if (currentSessionId === sessionToDelete) {
+                        currentSessionId = null;
+                        location.reload();
+                    }
+                    loadSessions();
+                }
+            } catch (err) {
+                console.error("Error deleting session:", err)
+            } finally {
+                if (deleteModalInstance) deleteModalInstance.hide();
+                sessionToDelete = null;
+                confirmBtn.innerHTML = 'ลบถาวร';
+                confirmBtn.disabled = true;
+            }
+        });
+    }
+});
+
 async function deleteSession(id, e) {
     e.stopPropagation();
-    if(!confirm("ลบห้องสนทนานี้ถาวร?")) return;
-    const res = await fetch(`/api/sessions/${id}`, {method: 'DELETE'});
-    if((await res.json()).ok) {
-        if(currentSessionId === id) { currentSessionId = null; location.reload(); }
-        loadSessions();
+    sessionToDelete = id;
+    if (!deleteModalInstance) {
+        deleteModalInstance = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
     }
+    deleteModalInstance.show();
 }
 
 async function exportChat() {

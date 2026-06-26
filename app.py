@@ -152,14 +152,26 @@ def api_ask():
     if sessions[session_id]["status"] != "ready": return jsonify({"ok": False, "error": "กรุณารอประมวลผล..."}), 400
     
     try:
-        docs = sessions[session_id]["retriever"].invoke(query)
+        vector_db = rag.get_vector_db(session_id)
+
+        results = vector_db.similarity_search_with_score(query, k=6)
+
+        docs = [res[0] for res in results]
+
+        # docs = sessions[session_id]["retriever"].invoke(query)
         context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {d.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(d.metadata)}]:\n{d.page_content}" for d in docs])
         
         dynamic_chain = rag.get_chain(model_name=model_name)
         answer = dynamic_chain.invoke({"context": context, "question": query, "chat_history": sessions[session_id]["chat_history"]})
         
         pages = sorted(list(set(get_page_number(d.metadata) for d in docs)))
-        chunks = [{"content": d.page_content, "page": get_page_number(d.metadata), "filename": d.metadata.get("filename", "ไม่ระบุ")} for d in docs]
+
+        chunks = [{
+            "content": d.page_content,
+            "page": get_page_number(d.metadata),
+            "filename": d.metadata.get("filename", "ไม่ระบุ"),
+            "score": round(score, 4)
+            } for d, score in results]
         
         sessions[session_id]["chat_history"].extend([
             HumanMessage(content=query),
@@ -188,9 +200,10 @@ class API:
                 export_text += f"(อ้างอิงจากหน้า: {', '.join(map(str, msg.additional_kwargs['pages']))})\n"
             export_text += "-" * 30 + "\n\n"
         
-        save_path = webview.windows[0].create_file_dialog(webview.SAVE_DIALOG, save_filename=f"Chat_Summary.txt")
+        save_path = webview.windows[0].create_file_dialog(webview.FileDialog.SAVE, save_filename=f"Chat_Summary.txt")
         if save_path:
-            with open(save_path[0] if isinstance(save_path, list) else save_path, 'w', encoding='utf-8') as f:
+            actual_path = save_path[0] if isinstance(save_path, (list, tuple)) else save_path
+            with open(actual_path, 'w', encoding='utf-8') as f:
                 f.write(export_text)
             return True
         return False

@@ -11,7 +11,10 @@ class RAGEngine:
     def __init__(self, persist_dir: str, embedding_model: str):
         self.persist_dir = persist_dir
         self.embedding_model = embedding_model
-        self.embeddings = HuggingFaceEmbeddings(model_name=embedding_model)
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=embedding_model,
+            encode_kwargs={'normalize_embeddings': True}
+            )
 
     def get_vector_db(self, session_id: str) -> Chroma:
         """ดึงหรือสร้างอินสแตนซ์ของ Chroma สำหรับแต่ละเซสชัน"""
