@@ -7,6 +7,8 @@ import webview
 import json
 from flask import Flask, request, jsonify, render_template
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
 
 from core.document import load_single_file
 from core.rag_engine import RAGEngine
@@ -78,10 +80,23 @@ def build_rag_task(file_paths: list, session_id: str, is_append: bool):
             sessions[session_id]["status"] = "ready"
             return
 
-        vector_db = rag.build_or_append_db(session_id, all_docs, is_append=is_append)
+        # Vector Retriever
+        vector_db, splits = rag.build_or_append_db(session_id, all_docs, is_append=is_append)
+        vector_retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+
+        # Keyword Retriever
+        bm25_retriever = BM25Retriever.from_documents(splits)
+        bm25_retriever.k = 3
+
+        # Ensemble BOTH Retriever and turn into Hybrid Retriever
+        hybrid_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, vector_retriever],
+            weights=[0.5, 0.5] # weights คือให้นำหนักความสำคัญ 50/50
+        )
+
 
         sessions[session_id].update({
-            "retriever": vector_db.as_retriever(search_kwargs={"k": 6}),
+            "retriever": hybrid_retriever,
             "base_chain": rag.get_chain("llama3"),
             "status": "ready"
         })
@@ -152,13 +167,10 @@ def api_ask():
     if sessions[session_id]["status"] != "ready": return jsonify({"ok": False, "error": "กรุณารอประมวลผล..."}), 400
     
     try:
-        vector_db = rag.get_vector_db(session_id)
+        hybrid_retriever = sessions[session_id]["retriever"]
 
-        results = vector_db.similarity_search_with_score(query, k=6)
+        docs = hybrid_retriever.invoke(query)
 
-        docs = [res[0] for res in results]
-
-        # docs = sessions[session_id]["retriever"].invoke(query)
         context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {d.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(d.metadata)}]:\n{d.page_content}" for d in docs])
         
         dynamic_chain = rag.get_chain(model_name=model_name)
@@ -170,8 +182,8 @@ def api_ask():
             "content": d.page_content,
             "page": get_page_number(d.metadata),
             "filename": d.metadata.get("filename", "ไม่ระบุ"),
-            "score": round(score, 4)
-            } for d, score in results]
+            "score": "Hybrid Result"
+            } for d in docs]
         
         sessions[session_id]["chat_history"].extend([
             HumanMessage(content=query),

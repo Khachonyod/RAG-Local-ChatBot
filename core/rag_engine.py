@@ -49,7 +49,7 @@ class RAGEngine:
                 collection_name=f"temp_{session_id}", 
                 persist_directory=self.persist_dir
             )
-        return vector_db
+        return vector_db, splits
 
     def get_chain(self, model_name: str = "llama3"):
         """คอมโพส Chain ตามโมเดลที่ผู้ใช้ระบุ"""
