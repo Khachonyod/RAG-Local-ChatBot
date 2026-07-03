@@ -7,8 +7,8 @@ import webview
 import json
 from flask import Flask, request, jsonify, render_template
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
-from langchain_community.retrievers import BM25Retriever
-from langchain_classic.retrievers import EnsembleRetriever
+from langchain_core.documents import Document
+from rank_bm25 import BM25Okapi
 
 from core.document import load_single_file
 from core.rag_engine import RAGEngine
@@ -53,11 +53,28 @@ def load_sessions():
             data = json.load(f)
             for sid, sdata in data.items():
                 vector_db = rag.get_vector_db(sid)
+                
+                # ชุบชีวิตดัชนีคำ BM25 และดึงโครงสร้างย่อยของเอกสารกลับคืนมาจาก Chroma DB
+                try:
+                    ch_data = vector_db.get()
+                    splits = [
+                        Document(page_content=doc, metadata=meta)
+                        for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
+                    ]
+                    tokenized_corpus = [d.page_content.split() for d in splits]
+                    bm25 = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
+                except Exception as e:
+                    print(f"ไม่สามารถดึงข้อมูล Chroma สำหรับ Session {sid}: {e}")
+                    splits = []
+                    bm25 = None
+
                 sessions[sid] = {
                     "status": "ready",
                     "filenames": sdata["filenames"],
                     "chat_history": messages_from_dict(sdata["chat_history"]),
-                    "retriever": vector_db.as_retriever(search_kwargs={"k": 6}),
+                    "vector_db": vector_db,
+                    "bm25": bm25,
+                    "splits": splits,
                     "base_chain": rag.get_chain("llama3")
                 }
     except Exception as e:
@@ -80,23 +97,24 @@ def build_rag_task(file_paths: list, session_id: str, is_append: bool):
             sessions[session_id]["status"] = "ready"
             return
 
-        # Vector Retriever
-        vector_db, splits = rag.build_or_append_db(session_id, all_docs, is_append=is_append)
-        vector_retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+        # 1. บันทึกลงฐานข้อมูล Vector เสมอ
+        vector_db, _ = rag.build_or_append_db(session_id, all_docs, is_append=is_append)
+        
+        # 2. ดึงข้อมูล Chunk ทั้งหมด (รวมของเก่า + ของใหม่) จากฐานข้อมูลมาทำดัชนี BM25
+        ch_data = vector_db.get()
+        all_splits = [
+            Document(page_content=doc, metadata=meta)
+            for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
+        ]
+        
+        tokenized_corpus = [doc.page_content.split() for doc in all_splits]
+        bm25 = BM25Okapi(tokenized_corpus)
 
-        # Keyword Retriever
-        bm25_retriever = BM25Retriever.from_documents(splits)
-        bm25_retriever.k = 3
-
-        # Ensemble BOTH Retriever and turn into Hybrid Retriever
-        hybrid_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, vector_retriever],
-            weights=[0.5, 0.5] # weights คือให้นำหนักความสำคัญ 50/50
-        )
-
-
+        # 3. อัปเดตคีย์โครงสร้างใหม่ลงใน Session ให้ครบถ้วนและสอดคล้องกับ api_ask
         sessions[session_id].update({
-            "retriever": hybrid_retriever,
+            "vector_db": vector_db,
+            "bm25": bm25,
+            "splits": all_splits,
             "base_chain": rag.get_chain("llama3"),
             "status": "ready"
         })
@@ -116,7 +134,8 @@ def api_delete_sessions(session_id):
         rag.get_vector_db(session_id).delete_collection()
     except Exception as e:
         print(f"Warning: ไม่พบข้อมูล collection - {e}")
-    del sessions[session_id]
+    if session_id in sessions:
+        del sessions[session_id]
     save_sessions()
     return jsonify({"ok": True})
 
@@ -139,7 +158,7 @@ def api_load():
         session_id = uuid.uuid4().hex
         sessions[session_id] = {
             "status": "idle", "filenames": [os.path.basename(f) for f in files_to_process],
-            "chat_history": [], "retriever": None, "base_chain": None
+            "chat_history": [], "vector_db": None, "bm25": None, "splits": None, "base_chain": None
         }
 
     threading.Thread(target=build_rag_task, args=(files_to_process, session_id, is_append), daemon=True).start()
@@ -167,23 +186,79 @@ def api_ask():
     if sessions[session_id]["status"] != "ready": return jsonify({"ok": False, "error": "กรุณารอประมวลผล..."}), 400
     
     try:
-        hybrid_retriever = sessions[session_id]["retriever"]
+        vector_db = sessions[session_id]["vector_db"]
+        bm25 = sessions[session_id]["bm25"]
+        splits = sessions[session_id]["splits"]
 
-        docs = hybrid_retriever.invoke(query)
+        #===================================
+        # Semantic Search (Vector) ดึง Top10 
+        #===================================
+        vec_result = vector_db.similarity_search_with_score(query, k=10)
+        vec_scores_map = {}
 
-        context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {d.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(d.metadata)}]:\n{d.page_content}" for d in docs])
+        if vec_result:
+            vec_distances = [res[1] for res in vec_result]
+            max_d, min_d = max(vec_distances), min(vec_distances)
+
+            for doc, dist in vec_result:
+                norm_score = 1.0 if max_d == min_d else (max_d - dist) / (max_d - min_d)
+                vec_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
+
+        #================================
+        # Keyword Search (BM25) ดึง Top10
+        #================================
+        tokenized_query = query.split()
+        bm25_all_scores = bm25.get_scores(tokenized_query)  # แก้ไขจาก get_score เป็น get_scores แล้ว
+
+        top_10_idx = sorted(range(len(bm25_all_scores)), key=lambda i: bm25_all_scores[i], reverse=True)[:10]
+        bm25_scores_map = {}
+
+        if top_10_idx:
+            bm25_top_scores = [bm25_all_scores[i] for i in top_10_idx]
+            max_b, min_b = max(bm25_top_scores), min(bm25_top_scores)
+
+            for i in top_10_idx:
+                raw_score = bm25_all_scores[i]
+                norm_score = 1.0 if max_b == min_b else (raw_score - min_b) / (max_b - min_b)
+                doc = splits[i]
+                bm25_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
+
+        #============================
+        # Data Fusion & Weighted Sum
+        #============================
+        w_vec = 0.7 
+        w_bm25 = 0.3 
+
+        hybrid_result = []
+        all_contents = set(vec_scores_map.keys()).union(set(bm25_scores_map.keys()))
+
+        for content in all_contents:
+            v_data = vec_scores_map.get(content, {"score": 0.0, "doc": None})
+            b_data = bm25_scores_map.get(content, {"score": 0.0, "doc": None})
+
+            actual_doc = v_data["doc"] if v_data["doc"] else b_data["doc"]
+            final_score = (w_vec * v_data["score"]) + (w_bm25 * b_data["score"])
+            hybrid_result.append((actual_doc, final_score))
         
-        dynamic_chain = rag.get_chain(model_name=model_name)
+        hybrid_result.sort(key=lambda x: x[1], reverse=True)
+        top_docs = hybrid_result[:6]
+
+        # ==========================================
+        # ส่งข้อมูลให้ LLM ตอบคำถาม
+        # ==========================================
+        context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" for doc, score in top_docs])
+        
+        dynamic_chain = sessions[session_id]["base_chain"]
         answer = dynamic_chain.invoke({"context": context, "question": query, "chat_history": sessions[session_id]["chat_history"]})
         
-        pages = sorted(list(set(get_page_number(d.metadata) for d in docs)))
+        pages = sorted(list(set(get_page_number(doc.metadata) for doc, score in top_docs)))
 
         chunks = [{
-            "content": d.page_content,
-            "page": get_page_number(d.metadata),
-            "filename": d.metadata.get("filename", "ไม่ระบุ"),
-            "score": "Hybrid Result"
-            } for d in docs]
+            "content": doc.page_content,
+            "page": get_page_number(doc.metadata),
+            "filename": doc.metadata.get("filename", "ไม่ระบุ"),
+            "score": f"{round(score * 100, 2)}%"
+            } for doc, score in top_docs]
         
         sessions[session_id]["chat_history"].extend([
             HumanMessage(content=query),
