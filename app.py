@@ -12,13 +12,7 @@ from rank_bm25 import BM25Okapi
 
 from core.document import load_single_file
 from core.rag_engine import RAGEngine
-
-# ==================== CONFIGURATION ====================
-TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-POPPLER_PATH = r'C:\poppler\Library\bin'
-SESSION_FILE = "sessions.json"
-PERSIST_DIR = os.path.join(os.getcwd(), "chroma_db")
-EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+from core.config import TESSERACT_CMD, POPPLER_PATH, SESSION_FILE, PERSIST_DIR, EMBEDDING_MODEL
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 sessions = {}
@@ -74,8 +68,7 @@ def load_sessions():
                     "chat_history": messages_from_dict(sdata["chat_history"]),
                     "vector_db": vector_db,
                     "bm25": bm25,
-                    "splits": splits,
-                    "base_chain": rag.get_chain("llama3")
+                    "splits": splits
                 }
     except Exception as e:
         print(f"ไม่สามารถโหลดประวัติเดิมได้: {e}")
@@ -115,7 +108,6 @@ def build_rag_task(file_paths: list, session_id: str, is_append: bool):
             "vector_db": vector_db,
             "bm25": bm25,
             "splits": all_splits,
-            "base_chain": rag.get_chain("llama3"),
             "status": "ready"
         })
         save_sessions()
@@ -158,7 +150,7 @@ def api_load():
         session_id = uuid.uuid4().hex
         sessions[session_id] = {
             "status": "idle", "filenames": [os.path.basename(f) for f in files_to_process],
-            "chat_history": [], "vector_db": None, "bm25": None, "splits": None, "base_chain": None
+            "chat_history": [], "vector_db": None, "bm25": None, "splits": None
         }
 
     threading.Thread(target=build_rag_task, args=(files_to_process, session_id, is_append), daemon=True).start()
@@ -248,7 +240,7 @@ def api_ask():
         # ==========================================
         context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" for doc, score in top_docs])
         
-        dynamic_chain = sessions[session_id]["base_chain"]
+        dynamic_chain = rag.get_chain(model_name)
         answer = dynamic_chain.invoke({"context": context, "question": query, "chat_history": sessions[session_id]["chat_history"]})
         
         pages = sorted(list(set(get_page_number(doc.metadata) for doc, score in top_docs)))

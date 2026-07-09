@@ -15,6 +15,7 @@ class RAGEngine:
             model_name=embedding_model,
             encode_kwargs={'normalize_embeddings': True}
             )
+        self._chain_cache = {}
 
     def get_vector_db(self, session_id: str) -> Chroma:
         """ดึงหรือสร้างอินสแตนซ์ของ Chroma สำหรับแต่ละเซสชัน"""
@@ -53,5 +54,7 @@ class RAGEngine:
 
     def get_chain(self, model_name: str = "llama3"):
         """คอมโพส Chain ตามโมเดลที่ผู้ใช้ระบุ"""
-        llm = ChatOllama(model=model_name, temperature=0)
-        return self.get_prompt_template() | llm | StrOutputParser()
+        if model_name not in self._chain_cache:
+            llm = ChatOllama(model=model_name, temperature=0)
+            self._chain_cache[model_name] = self.get_prompt_template() | llm | StrOutputParser()
+        return self._chain_cache[model_name]
