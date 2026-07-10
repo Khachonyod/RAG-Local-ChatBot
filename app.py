@@ -5,7 +5,7 @@ import uuid
 import threading
 import webview
 import json
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response, stream_with_context
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi
@@ -235,13 +235,10 @@ def api_ask():
         hybrid_result.sort(key=lambda x: x[1], reverse=True)
         top_docs = hybrid_result[:6]
 
-        # ==========================================
-        # ส่งข้อมูลให้ LLM ตอบคำถาม
-        # ==========================================
         context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" for doc, score in top_docs])
-        
         dynamic_chain = rag.get_chain(model_name)
-        answer = dynamic_chain.invoke({"context": context, "question": query, "chat_history": sessions[session_id]["chat_history"]})
+
+        # answer = dynamic_chain.invoke({"context": context, "question": query, "chat_history": sessions[session_id]["chat_history"]})
         
         pages = sorted(list(set(get_page_number(doc.metadata) for doc, score in top_docs)))
 
@@ -251,13 +248,34 @@ def api_ask():
             "filename": doc.metadata.get("filename", "ไม่ระบุ"),
             "score": f"{round(score * 100, 2)}%"
             } for doc, score in top_docs]
-        
-        sessions[session_id]["chat_history"].extend([
-            HumanMessage(content=query),
-            AIMessage(content=answer, additional_kwargs={"pages": pages, "chunks": chunks})
-        ])
-        save_sessions()
-        return jsonify({"ok": True, "answer": answer, "pages": pages, "chunks": chunks})
+        # สร้าง Generator เพื่อใช้ทำ Streaming Response
+        def generate_stream():
+            full_answer = ""
+            
+            # บรรทัดแรก: ส่งข้อมูลโครงสร้างการอ้างอิงเอกสารไปเตรียมไว้ก่อน
+            meta_payload = {"type": "metadata", "pages": pages, "chunks": chunks}
+            yield f"data: {json.dumps(meta_payload, ensure_ascii=False)}\n\n"
+            
+            # บรรทัดต่อๆ ไป: ดึง Token ออกมาจากโมเดลทีละคำผ่านเมธอด .stream()
+            chain_input = {
+                "context": context, 
+                "question": query, 
+                "chat_history": sessions[session_id]["chat_history"]
+            }
+            for token in dynamic_chain.stream(chain_input):
+                full_answer += token
+                text_payload = {"type": "text", "content": token}
+                yield f"data: {json.dumps(text_payload, ensure_ascii=False)}\n\n"
+            
+            # เมื่อโมเดลสร้างเสร็จสิ้น ทำการบันทึกลงหน่วยความจำระบบ
+            sessions[session_id]["chat_history"].extend([
+                HumanMessage(content=query),
+                AIMessage(content=full_answer, additional_kwargs={"pages": pages, "chunks": chunks})
+            ])
+            save_sessions()
+
+        return Response(stream_with_context(generate_stream()), mimetype='text/event-stream')
+
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
