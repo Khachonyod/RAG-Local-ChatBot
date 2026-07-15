@@ -4,8 +4,8 @@ import sys
 import uuid
 import threading
 import webview
-import json
-from flask import Flask, request, jsonify, render_template, Response, stream_with_context
+import json as json_lib
+from flask import Flask, request, jsonify, render_template, Response
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi
@@ -38,13 +38,13 @@ def save_sessions():
         for sid, sdata in sessions.items() if sdata["status"] == "ready"
     }
     with open(SESSION_FILE, "w", encoding="utf-8") as f:
-        json.dump(data_to_save, f, ensure_ascii=False, indent=4)
+        json_lib.dump(data_to_save, f, ensure_ascii=False, indent=4)
 
 def load_sessions():
     if not os.path.exists(SESSION_FILE): return
     try:
         with open(SESSION_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json_lib.load(f)
             for sid, sdata in data.items():
                 vector_db = rag.get_vector_db(sid)
                 
@@ -173,108 +173,114 @@ def api_history(session_id):
 def api_ask():
     data = request.get_json()
     session_id, query, model_name = data.get("session_id"), data.get("query"), data.get("model", "llama3")
-    
-    if session_id not in sessions: return jsonify({"ok": False, "error": "ไม่พบ Session"}), 400
-    if sessions[session_id]["status"] != "ready": return jsonify({"ok": False, "error": "กรุณารอประมวลผล..."}), 400
-    
+
+    # ===== รับค่า Weight จาก Slider ของ frontend ===
+    try:
+        vec_weight = float(data.get("vec_weight", 0.7))
+    except (TypeError, ValueError):
+        vec_weight = 0.7
+    vec_weight = max(0.0, min(1.0, vec_weight)) #กันค่าเพี้ยนนอกช่วง 0-1
+    bm25_weight = 1.0 - vec_weight
+
+
+    if session_id not in sessions: 
+        return jsonify({"ok": False, "error": "ไม่พบ Session"}), 400
+    if sessions[session_id]["status"] != "ready": 
+        return jsonify({"ok": False, "error": "กรุณารอประมวลผล..."}), 400
+
     try:
         vector_db = sessions[session_id]["vector_db"]
         bm25 = sessions[session_id]["bm25"]
         splits = sessions[session_id]["splits"]
 
-        #===================================
-        # Semantic Search (Vector) ดึง Top10 
-        #===================================
+        if bm25 is None:
+            return jsonify({"ok": False, "error": "ยังไม่มีดัชนีค้นหาสำหรับ Session นี้"}), 400
+
+        # ===== ส่วน Retrieval เหมือนเดิมทุกอย่าง ทำให้เสร็จก่อน stream =====
         vec_result = vector_db.similarity_search_with_score(query, k=10)
         vec_scores_map = {}
-
         if vec_result:
             vec_distances = [res[1] for res in vec_result]
             max_d, min_d = max(vec_distances), min(vec_distances)
-
             for doc, dist in vec_result:
                 norm_score = 1.0 if max_d == min_d else (max_d - dist) / (max_d - min_d)
                 vec_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
 
-        #================================
-        # Keyword Search (BM25) ดึง Top10
-        #================================
         tokenized_query = query.split()
-        bm25_all_scores = bm25.get_scores(tokenized_query)  # แก้ไขจาก get_score เป็น get_scores แล้ว
-
+        bm25_all_scores = bm25.get_scores(tokenized_query)
         top_10_idx = sorted(range(len(bm25_all_scores)), key=lambda i: bm25_all_scores[i], reverse=True)[:10]
         bm25_scores_map = {}
-
         if top_10_idx:
             bm25_top_scores = [bm25_all_scores[i] for i in top_10_idx]
             max_b, min_b = max(bm25_top_scores), min(bm25_top_scores)
-
             for i in top_10_idx:
                 raw_score = bm25_all_scores[i]
                 norm_score = 1.0 if max_b == min_b else (raw_score - min_b) / (max_b - min_b)
                 doc = splits[i]
                 bm25_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
 
-        #============================
-        # Data Fusion & Weighted Sum
-        #============================
-        w_vec = 0.7 
-        w_bm25 = 0.3 
-
+        w_vec, w_bm25 = vec_weight, bm25_weight
+        
         hybrid_result = []
         all_contents = set(vec_scores_map.keys()).union(set(bm25_scores_map.keys()))
-
         for content in all_contents:
             v_data = vec_scores_map.get(content, {"score": 0.0, "doc": None})
             b_data = bm25_scores_map.get(content, {"score": 0.0, "doc": None})
-
             actual_doc = v_data["doc"] if v_data["doc"] else b_data["doc"]
             final_score = (w_vec * v_data["score"]) + (w_bm25 * b_data["score"])
             hybrid_result.append((actual_doc, final_score))
-        
         hybrid_result.sort(key=lambda x: x[1], reverse=True)
         top_docs = hybrid_result[:6]
 
-        context = "\n\n".join([f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" for doc, score in top_docs])
-        dynamic_chain = rag.get_chain(model_name)
-
-        # answer = dynamic_chain.invoke({"context": context, "question": query, "chat_history": sessions[session_id]["chat_history"]})
-        
+        context = "\n\n".join([
+            f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" 
+            for doc, score in top_docs
+        ])
         pages = sorted(list(set(get_page_number(doc.metadata) for doc, score in top_docs)))
-
         chunks = [{
             "content": doc.page_content,
             "page": get_page_number(doc.metadata),
             "filename": doc.metadata.get("filename", "ไม่ระบุ"),
             "score": f"{round(score * 100, 2)}%"
             } for doc, score in top_docs]
-        # สร้าง Generator เพื่อใช้ทำ Streaming Response
-        def generate_stream():
-            full_answer = ""
-            
-            # บรรทัดแรก: ส่งข้อมูลโครงสร้างการอ้างอิงเอกสารไปเตรียมไว้ก่อน
-            meta_payload = {"type": "metadata", "pages": pages, "chunks": chunks}
-            yield f"data: {json.dumps(meta_payload, ensure_ascii=False)}\n\n"
-            
-            # บรรทัดต่อๆ ไป: ดึง Token ออกมาจากโมเดลทีละคำผ่านเมธอด .stream()
-            chain_input = {
-                "context": context, 
-                "question": query, 
-                "chat_history": sessions[session_id]["chat_history"]
-            }
-            for token in dynamic_chain.stream(chain_input):
-                full_answer += token
-                text_payload = {"type": "text", "content": token}
-                yield f"data: {json.dumps(text_payload, ensure_ascii=False)}\n\n"
-            
-            # เมื่อโมเดลสร้างเสร็จสิ้น ทำการบันทึกลงหน่วยความจำระบบ
-            sessions[session_id]["chat_history"].extend([
-                HumanMessage(content=query),
-                AIMessage(content=full_answer, additional_kwargs={"pages": pages, "chunks": chunks})
-            ])
-            save_sessions()
 
-        return Response(stream_with_context(generate_stream()), mimetype='text/event-stream')
+        # ===== dynamic_chain ตามข้อ 1 ที่แก้ไปแล้ว =====
+        dynamic_chain = rag.get_chain(model_name)
+        chat_history_snapshot = sessions[session_id]["chat_history"]
+
+        def generate():
+            full_answer = ""
+            try:
+                # .stream() คืน generator ของ token ทีละชิ้น ต่างจาก .invoke() ที่รอครบก่อน
+                for token in dynamic_chain.stream({
+                    "context": context, 
+                    "question": query, 
+                    "chat_history": chat_history_snapshot
+                }):
+                    full_answer += token
+                    # SSE format: ต้องขึ้นต้นด้วย "data: " และปิดท้ายด้วย \n\n เสมอ
+                    payload = json_lib.dumps({"token": token}, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+
+                # stream จบแล้ว ค่อยบันทึก history (ต้องรอให้ full_answer ครบก่อน)
+                sessions[session_id]["chat_history"].extend([
+                    HumanMessage(content=query),
+                    AIMessage(content=full_answer, additional_kwargs={"pages": pages, "chunks": chunks})
+                ])
+                save_sessions()
+
+                # ส่ง event สุดท้ายพร้อม pages/chunks ให้ frontend เอาไปแสดงผล
+                final_payload = json_lib.dumps({"done": True, "pages": pages, "chunks": chunks}, ensure_ascii=False)
+                yield f"data: {final_payload}\n\n"
+
+            except Exception as e:
+                error_payload = json_lib.dumps({"error": str(e)}, ensure_ascii=False)
+                yield f"data: {error_payload}\n\n"
+
+        return Response(generate(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no"  # กัน proxy บาง config buffer ทั้งก้อนไว้ก่อนส่ง
+        })
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

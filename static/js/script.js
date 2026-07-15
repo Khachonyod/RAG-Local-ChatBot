@@ -1,5 +1,6 @@
 /* static/js/script.js */
 let currentSessionId = null;
+let vecWeight = 0.7
 
 // --- Webview & Base Setup ---
 window.addEventListener('pywebviewready', () => {
@@ -17,6 +18,7 @@ const uiState = (isEnabled) => {
     document.getElementById('model-selector').classList.toggle('d-none', !isEnabled);
     document.getElementById('export-btn').classList.toggle('d-none', !isEnabled);
     document.getElementById('append-btn').classList.toggle('d-none', !isEnabled);
+    document.getElementById('weight-control-wrapper').classList.toggle('d-none', !isEnabled)
     if(isEnabled) document.getElementById('query-input').focus();
 };
 
@@ -142,111 +144,95 @@ async function send() {
     appendMsg('user', query);
     input.value = '';
     uiState(false);
-    showTyping();
+    removeTyping(); // เอา typing indicator เดิมออก เพราะจะใช้ streaming แทน
+
+    // สร้าง div เปล่าไว้รอรับ token ทีละตัว
+    const box = document.getElementById('chat-box');
+    const aiDiv = document.createElement('div');
+    aiDiv.className = 'msg ai shadow-sm';
+    aiDiv.innerHTML = '<span class="stream-text"></span>';
+    box.appendChild(aiDiv);
+    box.scrollTop = box.scrollHeight;
+    const textSpan = aiDiv.querySelector('.stream-text');
 
     try {
-        const res = await fetch('/api/ask', { 
-            method: 'POST', 
-            headers: {'Content-Type': 'application/json'}, 
-            body: JSON.stringify({ 
-                query, 
-                session_id: currentSessionId, 
-                model: document.getElementById('model-selector').value 
-            }) 
+        const res = await fetch('/api/ask', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query,
+                session_id: currentSessionId,
+                model: document.getElementById('model-selector').value,
+                vec_weight: vecWeight
+            })
         });
 
-        if (!res.ok) {
-            removeTyping();
-            appendMsg('ai', 'เกิดข้อผิดพลาดจากเซิร์ฟเวอร์');
-            uiState(true);
-            return;
-        }
+        if (!res.ok || !res.body) throw new Error("Stream connection failed");
 
-        removeTyping();
-
-        // 1. สร้างโครงสร้างกล่องข้อความ AI เปล่าๆ มารอรับข้อความสตรีม
-        const box = document.getElementById('chat-box');
-        const msgDiv = document.createElement('div');
-        msgDiv.className = 'msg ai';
-        const textSpan = document.createElement('span');
-        msgDiv.appendChild(textSpan);
-        box.appendChild(msgDiv);
-
-        // 2. เตรียม Reader สำหรับการรับข้อมูลแบบต่อเนื่อง (ReadableStream)
         const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let fullText = '';
-        let metaData = null;
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';       // เก็บ chunk ดิบที่ยังไม่ครบ event
+        let fullText = '';     // เก็บข้อความเต็มสะสม
 
         while (true) {
-            const { value, done } = await reader.read();
-            if (done) break; // สตรีมสิ้นสุดเมื่อหมดข้อมูล
+            const { done, value } = await reader.read();
+            if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop(); // เก็บเศษบรรทัดที่ยังไม่สมบูรณ์ไว้ในบัฟเฟอร์
+            
+            // SSE คั่น event ด้วย \n\n อาจมีหลาย event มาพร้อมกันใน chunk เดียว
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop(); // ส่วนท้ายที่อาจยังไม่ครบ event เก็บไว้รอ chunk ถัดไป
 
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const rawData = line.slice(6).trim();
-                    if (!rawData) continue;
-                    
-                    try {
-                        const parsed = JSON.parse(rawData);
-                        
-                        if (parsed.type === 'metadata') {
-                            // เก็บข้อมูลอ้างอิงไว้สำหรับวาดตอนท้ายสตรีม
-                            metaData = parsed;
-                        } else if (parsed.type === 'text') {
-                            // นำชิ้นส่วนตัวอักษรมาต่อเพิ่มและแสดงผลบนจอแบบ Real-time
-                            fullText += parsed.content;
-                            textSpan.innerHTML = fullText.replace(/\n/g, '<br>');
-                            box.scrollTop = box.scrollHeight;
-                        }
-                    } catch (e) {
-                        console.error("Error parsing stream token:", e);
+            for (const part of parts) {
+                if (!part.startsWith('data: ')) continue;
+                const jsonStr = part.slice(6);
+                let payload;
+                try { payload = JSON.parse(jsonStr); } catch { continue; }
+
+                if (payload.token) {
+                    fullText += payload.token;
+                    textSpan.innerHTML = fullText.replace(/\n/g, '<br>');
+                    box.scrollTop = box.scrollHeight;
+                }
+
+                if (payload.error) {
+                    textSpan.innerHTML = 'เกิดข้อผิดพลาด: ' + payload.error;
+                }
+
+                if (payload.done) {
+                    // stream จบแล้ว เพิ่ม pages/chunks เข้าไปใน div เดิม (เหมือน appendMsg เดิมทำ)
+                    if (payload.pages && payload.pages.length) {
+                        const badges = payload.pages.map(p => `<span class="badge bg-light text-dark border me-1">หน้า ${p}</span>`).join('');
+                        aiDiv.innerHTML += `<div class="mt-3 pt-3 border-top text-secondary" style="font-size: 0.85rem;"><i class="bi bi-journal-bookmark-fill text-primary"></i> <b>อ้างอิง:</b> ${badges}</div>`;
                     }
+                    if (payload.chunks && payload.chunks.length) {
+                        const chunksHtml = payload.chunks.map(c => {
+                            let badgeColor = c.score < 1.0 ? 'bg-success' : c.score < 1.3 ? 'bg-warning text-dark' : 'bg-danger';
+                            const scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;">Distance: ${c.score}</span>`;
+                            return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
+                                <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page} ${scoreHtml})</div>
+                                <div class="text-muted">${c.content.replace(/\n/g, '<br>')}</div>
+                            </div>`;
+                        }).join('');
+                        aiDiv.innerHTML += `<details class="source-details"><summary><i class="bi bi-search me-1"></i> ดูข้อความต้นฉบับ</summary><div class="mt-2">${chunksHtml}</div></details>`;
+                    }
+                    box.scrollTop = box.scrollHeight;
                 }
             }
         }
-
-        // 3. เมื่อสตรีมข้อความเสร็จสิ้นสมบูรณ์ นำข้อมูล Metadata ที่เก็บไว้มาเรนเดอร์ปิดท้ายกล่องแชท
-        if (metaData) {
-            appendMetadataToMessage(msgDiv, metaData.pages, metaData.chunks);
-            box.scrollTop = box.scrollHeight;
-        }
-
-    } catch (err) { 
-        removeTyping();
-        appendMsg('ai', 'เซิร์ฟเวอร์ไม่ตอบสนอง'); 
-    } finally { 
-        uiState(true); 
-    } 
-}
-
-// ฟังก์ชันผู้ช่วยสำหรับสร้างองค์ประกอบแสดงผลอ้างอิงท้ายแชท (ย้ายตรรกะมาจาก appendMsg เดิม)
-function appendMetadataToMessage(div, pages = [], chunks = []) {
-    if (pages.length) {
-        const badges = pages.map(p => `<span class="badge bg-light text-dark border me-1">หน้า ${p}</span>`).join('');
-        div.innerHTML += `<div class="mt-3 pt-3 border-top text-secondary" style="font-size: 0.85rem;"><i class="bi bi-journal-bookmark-fill text-primary"></i> <b>อ้างอิง:</b> ${badges}</div>`;
-    }
-
-    if (chunks.length) {
-        const chunksHtml = chunks.map(c => {
-            let scoreHtml = '';
-            if (c.score !== undefined) {
-                scoreHtml = `<span class="badge bg-success ms-2 fw-normal" style="font-size: 0.75rem;">Score: ${c.score}</span>`;
-            }
-            return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
-                <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page} ${scoreHtml})</div>
-                <div class="text-muted">${c.content.replace(/\n/g, '<br>')}</div>
-            </div>`;
-        }).join('');
-
-        div.innerHTML += `<details class="source-details"><summary><i class="bi bi-search me-1"></i> ดูข้อความต้นฉบับ</summary><div class="mt-2">${chunksHtml}</div></details>`;
+    } catch (err) {
+        textSpan.innerHTML = 'เซิร์ฟเวอร์ไม่ตอบสนอง';
+        console.error(err);
+    } finally {
+        uiState(true);
     }
 }
+
+document.getElementById('weight-slider').addEventListener('input', (e) => {
+    const semanticPct = parseInt(e.target.value, 10);
+    vecWeight = semanticPct / 100;
+    document.getElementById('weight-display').textContent = `Vector ${semanticPct}% / BM25 ${100 - semanticPct}%`;
+});
 
 let sesionToDelete = null;
 let deleteModalInstance = null;

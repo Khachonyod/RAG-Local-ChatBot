@@ -4,4 +4,4 @@ __pycache__/
 *.pyc
 sessions.json
 desktop.ini
-.env
+.gitignore

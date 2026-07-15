@@ -34,6 +34,24 @@
                     <span class="badge bg-secondary me-2 rounded-pill px-3 py-2 fw-normal">ยังไม่ได้เลือกเอกสาร</span>
                 </span>
                 <div class="d-flex align-items-center ms-auto gap-2">
+                    <!-- ปรับค่า Weight -->
+                    <div class="dropdown d-none" id="weight-control-wrapper">
+                        <button class="btn btn-outline-secondary btn-sm rounded-pill px-3 py-2 fw-medium dropdown-toggle" 
+                                type="button" id="weight-dropdown-btn" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-sliders me-1"></i> น้ำหนักการค้นหา
+                        </button>
+                        <div class="dropdown-menu p-3" style="width: 280px;" aria-labelledby="weight-dropdown-btn">
+                            <label class="form-label small text-secondary mb-1 d-flex justify-content-between">
+                                <span>BM25</span>
+                                <span>Vector</span>
+                            </label>
+                            <input type="range" class="form-range" min="0" max="100" value="70" id="weight-slider">
+                            <div class="text-center small fw-medium text-primary" id="weight-display">
+                                Vector 70% / BM25 30%
+                            </div>
+                        </div>
+                    </div>
+                    <!-- เลือก Model -->
                     <select id="model-selector" class="form-select rounded-pill px-3 py-1 border-primary text-primary fw-medium d-none" style="width: auto;">
                         <option value="llama3">Llama 3</option>
                         <option value="qwen2.5:7b">Qwen 2.5</option>
