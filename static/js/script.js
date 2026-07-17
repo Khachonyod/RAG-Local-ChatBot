@@ -234,7 +234,7 @@ document.getElementById('weight-slider').addEventListener('input', (e) => {
     document.getElementById('weight-display').textContent = `Vector ${semanticPct}% / BM25 ${100 - semanticPct}%`;
 });
 
-let sesionToDelete = null;
+let sessionToDelete = null;
 let deleteModalInstance = null;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -263,7 +263,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (deleteModalInstance) deleteModalInstance.hide();
                 sessionToDelete = null;
                 confirmBtn.innerHTML = 'ลบถาวร';
-                confirmBtn.disabled = true;
+                confirmBtn.disabled = false;
             }
         });
     }
