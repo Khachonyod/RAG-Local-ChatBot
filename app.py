@@ -12,6 +12,7 @@ from rank_bm25 import BM25Okapi
 
 from core.document import load_single_file
 from core.rag_engine import RAGEngine
+from core.text_utils import thai_tokenize
 from core.config import TESSERACT_CMD, POPPLER_PATH, SESSION_FILE, PERSIST_DIR, EMBEDDING_MODEL
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -55,7 +56,7 @@ def load_sessions():
                         Document(page_content=doc, metadata=meta)
                         for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
                     ]
-                    tokenized_corpus = [d.page_content.split() for d in splits]
+                    tokenized_corpus = [thai_tokenize(d.page_content) for d in splits]
                     bm25 = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
                 except Exception as e:
                     print(f"ไม่สามารถดึงข้อมูล Chroma สำหรับ Session {sid}: {e}")
@@ -100,7 +101,7 @@ def build_rag_task(file_paths: list, session_id: str, is_append: bool):
             for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
         ]
         
-        tokenized_corpus = [doc.page_content.split() for doc in all_splits]
+        tokenized_corpus = [thai_tokenize(doc.page_content) for doc in all_splits]
         bm25 = BM25Okapi(tokenized_corpus)
 
         # 3. อัปเดตคีย์โครงสร้างใหม่ลงใน Session ให้ครบถ้วนและสอดคล้องกับ api_ask
@@ -206,7 +207,7 @@ def api_ask():
                 norm_score = 1.0 if max_d == min_d else (max_d - dist) / (max_d - min_d)
                 vec_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
 
-        tokenized_query = query.split()
+        tokenized_query = thai_tokenize(query)
         bm25_all_scores = bm25.get_scores(tokenized_query)
         top_10_idx = sorted(range(len(bm25_all_scores)), key=lambda i: bm25_all_scores[i], reverse=True)[:10]
         bm25_scores_map = {}
