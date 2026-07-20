@@ -166,7 +166,8 @@ def api_history(session_id):
     if session_id not in sessions: return jsonify({"ok": False, "error": "ไม่พบ Session"}), 404
     sdata = sessions[session_id]
     history = [{"role": "user" if m.type == "human" else "ai", "content": m.content, 
-                "pages": m.additional_kwargs.get("pages", []), "chunks": m.additional_kwargs.get("chunks", [])} 
+                "pages": m.additional_kwargs.get("pages", []), "chunks": m.additional_kwargs.get("chunks", []),
+                "query_terms": m.additional_kwargs.get("query_terms", [])} 
                for m in sdata["chat_history"]]
     return jsonify({"ok": True, "history": history, "filenames": sdata["filenames"], "status": sdata["status"]})
 
@@ -266,12 +267,12 @@ def api_ask():
                 # stream จบแล้ว ค่อยบันทึก history (ต้องรอให้ full_answer ครบก่อน)
                 sessions[session_id]["chat_history"].extend([
                     HumanMessage(content=query),
-                    AIMessage(content=full_answer, additional_kwargs={"pages": pages, "chunks": chunks})
+                    AIMessage(content=full_answer, additional_kwargs={"pages": pages, "chunks": chunks, "query_terms": tokenized_query})
                 ])
                 save_sessions()
 
-                # ส่ง event สุดท้ายพร้อม pages/chunks ให้ frontend เอาไปแสดงผล
-                final_payload = json_lib.dumps({"done": True, "pages": pages, "chunks": chunks}, ensure_ascii=False)
+                # ส่ง event สุดท้ายพร้อม pages/chunks/query_terms ให้ frontend เอาไปแสดงผล (ใช้ query_terms ไฮไลต์ในเนื้อหา source chunk)
+                final_payload = json_lib.dumps({"done": True, "pages": pages, "chunks": chunks, "query_terms": tokenized_query}, ensure_ascii=False)
                 yield f"data: {final_payload}\n\n"
 
             except Exception as e:

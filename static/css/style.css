@@ -146,6 +146,14 @@ details.source-details summary {
 
 details.source-details summary:hover { color: var(--primary-color); }
 
+mark.hl-match {
+    background: #fef08a;
+    color: inherit;
+    padding: 0 2px;
+    border-radius: 3px;
+    font-weight: 500;
+}
+
 /* Chat Typing Effect */
 .typing-indicator {
     display: flex;

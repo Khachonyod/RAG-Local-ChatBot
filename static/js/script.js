@@ -37,7 +37,24 @@ const removeTyping = () => {
     if(el) el.remove();
 };
 
-function appendMsg(role, text, pages = [], chunks = []) {
+// --- Highlight คำค้นหาใน source chunk ---
+function escapeRegex(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// terms: รายการคำที่ตัดมาแล้วจาก backend (pythainlp) — แม่นกว่าตัดด้วยช่องว่างฝั่ง client มาก
+// เพราะภาษาไทยไม่มีช่องว่างระหว่างคำ ("สวัสดีครับ" ตัดคำแบบ split(' ') ไม่ได้ ต้องให้ backend ตัดให้
+function highlightMatches(text, terms) {
+    if (!terms || !terms.length) return text;
+    const uniqueTerms = [...new Set(terms.filter(t => t && t.length >= 2))];
+    if (!uniqueTerms.length) return text;
+    // เรียงคำยาวก่อน กันกรณีคำสั้นไปแมตช์ตัดหน้าคำยาวที่มีคำสั้นซ้อนอยู่
+    const pattern = uniqueTerms.sort((a, b) => b.length - a.length).map(escapeRegex).join('|');
+    const re = new RegExp(`(${pattern})`, 'gi');
+    return text.replace(re, '<mark class="hl-match">$1</mark>');
+}
+
+function appendMsg(role, text, pages = [], chunks = [], queryTerms = []) {
     removeTyping();
     const box = document.getElementById('chat-box');
     const div = document.createElement('div');
@@ -64,7 +81,7 @@ function appendMsg(role, text, pages = [], chunks = []) {
 
             return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
                 <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page} ${scoreHtml})</div>
-                <div class="text-muted">${c.content.replace(/\n/g, '<br>')}</div>
+                <div class="text-muted">${highlightMatches(c.content, queryTerms).replace(/\n/g, '<br>')}</div>
             </div>`
         }).join('');
 
@@ -103,7 +120,7 @@ async function selectSession(sessionId) {
         document.getElementById('current-doc-title').innerHTML = `<span class="badge bg-primary me-2 rounded-pill px-3 py-2 fw-normal">ใช้งานอยู่</span> <span class="text-dark fw-medium text-truncate" style="max-width: 400px;">${data.filenames.length} เอกสารในระบบ</span>`;
         document.getElementById('chat-box').innerHTML = '';
         if (!data.history.length) appendMsg('ai', 'พร้อมตอบคำถามแล้วครับ ✨');
-        else data.history.forEach(msg => appendMsg(msg.role, msg.content, msg.pages, msg.chunks));
+        else data.history.forEach(msg => appendMsg(msg.role, msg.content, msg.pages, msg.chunks, msg.query_terms));
         uiState(true);
     }
 }
@@ -146,14 +163,15 @@ async function send() {
     uiState(false);
     removeTyping(); // เอา typing indicator เดิมออก เพราะจะใช้ streaming แทน
 
-    // สร้าง div เปล่าไว้รอรับ token ทีละตัว
+    // สร้าง div ไว้รอรับ token ทีละตัว โดยโชว์จุดไข่ปลาไว้ก่อนจนกว่า token แรกจะมาถึง
     const box = document.getElementById('chat-box');
     const aiDiv = document.createElement('div');
     aiDiv.className = 'msg ai shadow-sm';
-    aiDiv.innerHTML = '<span class="stream-text"></span>';
+    aiDiv.innerHTML = '<div class="typing-indicator stream-typing"><span></span><span></span><span></span></div><span class="stream-text"></span>';
     box.appendChild(aiDiv);
     box.scrollTop = box.scrollHeight;
     const textSpan = aiDiv.querySelector('.stream-text');
+    let streamTyping = aiDiv.querySelector('.stream-typing'); // เอาไว้ลบทิ้งตอน token แรกมาถึง
 
     try {
         const res = await fetch('/api/ask', {
@@ -190,12 +208,14 @@ async function send() {
                 try { payload = JSON.parse(jsonStr); } catch { continue; }
 
                 if (payload.token) {
+                    if (streamTyping) { streamTyping.remove(); streamTyping = null; } // ลบจุดไข่ปลาทิ้งทันทีที่มีข้อความจริง
                     fullText += payload.token;
                     textSpan.innerHTML = fullText.replace(/\n/g, '<br>');
                     box.scrollTop = box.scrollHeight;
                 }
 
                 if (payload.error) {
+                    if (streamTyping) { streamTyping.remove(); streamTyping = null; }
                     textSpan.innerHTML = 'เกิดข้อผิดพลาด: ' + payload.error;
                 }
 
@@ -211,7 +231,7 @@ async function send() {
                             const scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;">Distance: ${c.score}</span>`;
                             return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
                                 <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page} ${scoreHtml})</div>
-                                <div class="text-muted">${c.content.replace(/\n/g, '<br>')}</div>
+                                <div class="text-muted">${highlightMatches(c.content, payload.query_terms).replace(/\n/g, '<br>')}</div>
                             </div>`;
                         }).join('');
                         aiDiv.innerHTML += `<details class="source-details"><summary><i class="bi bi-search me-1"></i> ดูข้อความต้นฉบับ</summary><div class="mt-2">${chunksHtml}</div></details>`;
