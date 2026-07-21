@@ -5,10 +5,18 @@ import uuid
 import threading
 import webview
 import json as json_lib
+from html import escape as html_escape
 from flask import Flask, request, jsonify, render_template, Response
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 
 from core.document import load_single_file
 from core.rag_engine import RAGEngine
@@ -27,6 +35,15 @@ def get_resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+# ลงทะเบียนฟอนต์ไทย (Sarabun) สำหรับ export PDF — ฟอนต์เริ่มต้นของ reportlab ไม่มีตัวอักษรไทย
+# ถ้าไม่ลงทะเบียนฟอนต์นี้ ข้อความไทยใน PDF จะกลายเป็นกล่องสี่เหลี่ยมว่าง (.notdef glyph) ทั้งหมด
+FONT_REGULAR, FONT_BOLD = "Sarabun", "Sarabun-Bold"
+try:
+    pdfmetrics.registerFont(TTFont(FONT_REGULAR, get_resource_path("fonts/Sarabun-Regular.ttf")))
+    pdfmetrics.registerFont(TTFont(FONT_BOLD, get_resource_path("fonts/Sarabun-Bold.ttf")))
+except Exception as e:
+    print(f"[WARNING] โหลดฟอนต์ไทยสำหรับ PDF ไม่สำเร็จ ({e}) — ตัวอักษรไทยใน PDF export อาจแสดงผลผิดพลาด")
 
 def get_page_number(metadata):
     page = metadata.get("page")
@@ -296,22 +313,53 @@ class API:
     def save_chat(self, session_id):
         if session_id not in sessions or not webview.windows: return False
         history = sessions[session_id]["chat_history"]
-        export_text = f"=== รายงานการสนทนา: {', '.join(sessions[session_id]['filenames'])} ===\n" + "="*50 + "\n\n"
-        
+        filenames = ', '.join(sessions[session_id]['filenames'])
+
+        save_path = webview.windows[0].create_file_dialog(webview.FileDialog.SAVE, save_filename="Chat_Summary.pdf")
+        if not save_path:
+            return False
+        actual_path = save_path[0] if isinstance(save_path, (list, tuple)) else save_path
+
+        styles = getSampleStyleSheet()
+        # wordWrap="CJK" จำเป็นมากสำหรับภาษาไทย เพราะไม่มีช่องว่างระหว่างคำ
+        # ถ้าไม่ใส่ reportlab จะไม่ตัดบรรทัด ทำให้ข้อความยาว ๆ ล้นขอบกระดาษ
+        body_style = ParagraphStyle("ThaiBody", parent=styles["Normal"], fontName=FONT_REGULAR, fontSize=11, leading=16, wordWrap="CJK")
+        title_style = ParagraphStyle("ThaiTitle", parent=styles["Title"], fontName=FONT_BOLD, fontSize=18, textColor=colors.HexColor("#1E2761"), wordWrap="CJK")
+        user_role_style = ParagraphStyle("ThaiUserRole", parent=body_style, fontName=FONT_BOLD, fontSize=12, textColor=colors.HexColor("#0d6efd"), spaceBefore=8)
+        ai_role_style = ParagraphStyle("ThaiAiRole", parent=body_style, fontName=FONT_BOLD, fontSize=12, textColor=colors.HexColor("#334155"), spaceBefore=8)
+        cite_style = ParagraphStyle("ThaiCite", parent=body_style, fontSize=9.5, textColor=colors.HexColor("#6B7280"), leftIndent=12)
+
+        doc = SimpleDocTemplate(actual_path, pagesize=A4, topMargin=2*cm, bottomMargin=2*cm, leftMargin=2*cm, rightMargin=2*cm)
+        story = [
+            Paragraph("สรุปการสนทนา", title_style),
+            Paragraph(f"เอกสารอ้างอิง: {html_escape(filenames)}", body_style),
+            Spacer(1, 0.4*cm),
+            HRFlowable(width="100%", color=colors.HexColor("#CADCFC")),
+            Spacer(1, 0.3*cm),
+        ]
+
         for msg in history:
-            role = "USER" if msg.type == "human" else "AI ASSISTANT"
-            export_text += f"[{role}]:\n{msg.content}\n"
-            if role == "AI ASSISTANT" and msg.additional_kwargs.get("pages"):
-                export_text += f"(อ้างอิงจากหน้า: {', '.join(map(str, msg.additional_kwargs['pages']))})\n"
-            export_text += "-" * 30 + "\n\n"
-        
-        save_path = webview.windows[0].create_file_dialog(webview.FileDialog.SAVE, save_filename=f"Chat_Summary.txt")
-        if save_path:
-            actual_path = save_path[0] if isinstance(save_path, (list, tuple)) else save_path
-            with open(actual_path, 'w', encoding='utf-8') as f:
-                f.write(export_text)
-            return True
-        return False
+            is_user = msg.type == "human"
+            story.append(Paragraph("ผู้ใช้ (User)" if is_user else "ผู้ช่วย AI (Assistant)", user_role_style if is_user else ai_role_style))
+            story.append(Paragraph(html_escape(msg.content).replace("\n", "<br/>"), body_style))
+
+            if not is_user:
+                pages = msg.additional_kwargs.get("pages")
+                if pages:
+                    story.append(Spacer(1, 0.1*cm))
+                    story.append(Paragraph(f"อ้างอิงจากหน้า: {', '.join(map(str, pages))}", cite_style))
+                for c in msg.additional_kwargs.get("chunks", []):
+                    header = f"{html_escape(str(c.get('filename', '')))} (หน้า {c.get('page', '')}, distance {c.get('score', '')})"
+                    body = html_escape(str(c.get('content', ''))).replace("\n", "<br/>")
+                    story.append(Spacer(1, 0.1*cm))
+                    story.append(Paragraph(f"<b>{header}</b><br/>{body}", cite_style))
+
+            story.append(Spacer(1, 0.25*cm))
+            story.append(HRFlowable(width="100%", color=colors.HexColor("#E2E8F0")))
+            story.append(Spacer(1, 0.25*cm))
+
+        doc.build(story)
+        return True
 
 if __name__ == "__main__":
     load_sessions()
