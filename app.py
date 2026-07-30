@@ -29,6 +29,11 @@ sessions = {}
 # เรียกใช้อินสแตนซ์ของ RAG Engine
 rag = RAGEngine(persist_dir=PERSIST_DIR, embedding_model=EMBEDDING_MODEL)
 
+# ค่า hybrid score ขั้นต่ำ (0.0-1.0) ที่ถือว่า chunk นั้น "เกี่ยวข้องพอ" จะส่งเข้า context ให้ LLM
+# เดิมระบบดึง top-6 มาเสมอไม่ว่า score จะแย่แค่ไหน ทำให้บางครั้ง context เต็มไปด้วย chunk ที่ไม่เกี่ยวข้อง
+# แล้วทำให้ LLM สับสน/หลุดไปตอบมั่วทั้งที่ prompt สั่งห้ามไว้แล้ว — ปรับค่านี้ตามผลการทดลองจริงได้เลย
+RELEVANCE_THRESHOLD = 0.15
+
 def get_resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -249,12 +254,19 @@ def api_ask():
             final_score = (w_vec * v_data["score"]) + (w_bm25 * b_data["score"])
             hybrid_result.append((actual_doc, final_score))
         hybrid_result.sort(key=lambda x: x[1], reverse=True)
-        top_docs = hybrid_result[:6]
+        # ตัด chunk ที่ score ต่ำกว่า threshold ทิ้งก่อน ไม่ใช่แค่เอา top-6 มาเสมอเหมือนเดิม
+        # ป้องกันไม่ให้ context เต็มไปด้วยเนื้อหาที่ไม่เกี่ยวข้องเลยตอนคำถามไม่มีคำตอบในเอกสาร
+        top_docs = [item for item in hybrid_result[:6] if item[1] >= RELEVANCE_THRESHOLD]
 
-        context = "\n\n".join([
-            f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" 
-            for doc, score in top_docs
-        ])
+        if top_docs:
+            context = "\n\n".join([
+                f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" 
+                for doc, score in top_docs
+            ])
+        else:
+            # ไม่มี chunk ไหนผ่านเกณฑ์เลย บอก LLM ตรง ๆ แทนที่จะส่ง context ว่างเปล่าไปเฉย ๆ
+            # (context ว่างเปล่าอาจทำให้โมเดลบางตัวเผลอใช้ความรู้ทั่วไปตอบแทน)
+            context = "(ไม่พบข้อมูลที่เกี่ยวข้องเพียงพอในเอกสารสำหรับคำถามนี้)"
         pages = sorted(list(set(get_page_number(doc.metadata) for doc, score in top_docs)))
         chunks = [{
             "content": doc.page_content,
