@@ -71,12 +71,10 @@ function appendMsg(role, text, pages = [], chunks = [], queryTerms = []) {
             let scoreHtml = '';
 
             if (c.score !== undefined) {
-                let badgeColor = 'bg-secondary';
-                if (c.score < 1.0) badgeColor = 'bg-success';
-                else if (c.score < 1.3) badgeColor = 'bg-warning text-dark';
-                else badgeColor = 'bg-danger';
+                let scoreNum = parseFloat(c.score);
+                let badgeColor = scoreNum >= 70 ? 'bg-success' : scoreNum >= 40 ? 'bg-warning text-dark' : 'bg-danger';
 
-                scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;" title="L2 Distance (ยิ่งน้อยยิ่งแปลว่าคำถามตรงกับเนื้อหา)">Distance: ${c.score}</span>`;
+                scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;" title="ความแม่นยำ (ยิ่งมากยิ่งแปลว่าคำถามตรงกับเนื้อหา)">ความแม่นยำ: ${c.score}</span>`;
             }
 
             return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
@@ -227,8 +225,10 @@ async function send() {
                     }
                     if (payload.chunks && payload.chunks.length) {
                         const chunksHtml = payload.chunks.map(c => {
-                            let badgeColor = c.score < 1.0 ? 'bg-success' : c.score < 1.3 ? 'bg-warning text-dark' : 'bg-danger';
-                            const scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;">Distance: ${c.score}</span>`;
+                            let scoreNum = parseFloat(c.score);
+                            let badgeColor = scoreNum  >= 70 ? 'bg-success' : scoreNum >= 40 ? 'bg-warning text-dark' : 'bg-danger';
+
+                            const scoreHtml = `<span class="badge ${badgeColor} ms-2 fw-normal" style="font-size: 0.75rem;">ความแม่นยำ: ${c.score}</span>`;
                             return `<div class="border rounded p-2 mb-2 bg-white" style="font-size: 0.8rem; border-left: 3px solid var(--primary-color) !important;">
                                 <div class="fw-bold text-primary mb-1">${c.filename} (หน้า ${c.page} ${scoreHtml})</div>
                                 <div class="text-muted">${highlightMatches(c.content, payload.query_terms).replace(/\n/g, '<br>')}</div>

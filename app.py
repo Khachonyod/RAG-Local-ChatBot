@@ -104,12 +104,15 @@ def build_rag_task(file_paths: list, session_id: str, is_append: bool):
         for file_path in file_paths:
             try:
                 docs = load_single_file(file_path, POPPLER_PATH, TESSERACT_CMD)
+                # กรอง Document ที่ content ว่างเปล่าทิ้ง (เช่น หน้าที่ OCR แล้วไม่เจอตัวอักษรเลย)
+                # ไม่งั้น all_docs จะดู "ไม่ว่าง" ทั้งที่ไม่มีเนื้อหาจริง แล้วไปพังตอน Chroma upsert แทน
+                docs = [d for d in docs if d.page_content.strip()] if docs else []
                 if docs: all_docs.extend(docs)
             except Exception as e:
                 print(f"ข้ามไฟล์ {file_path} เนื่องจาก Error: {e}")
 
         if not all_docs:
-            if not is_append: raise ValueError("ไม่สามารถอ่านเนื้อหาจากไฟล์ใดๆ ได้เลย")
+            if not is_append: raise ValueError("ไม่สามารถอ่านเนื้อหาจากไฟล์ใดๆ ได้เลย (เอกสารอาจว่างเปล่าหรือ OCR ไม่สามารถอ่านตัวอักษรได้)")
             sessions[session_id]["status"] = "ready"
             return
 
@@ -236,10 +239,10 @@ def api_ask():
         bm25_scores_map = {}
         if top_10_idx:
             bm25_top_scores = [bm25_all_scores[i] for i in top_10_idx]
-            max_b, min_b = max(bm25_top_scores), min(bm25_top_scores)
+            max_b = max(bm25_top_scores)
             for i in top_10_idx:
                 raw_score = bm25_all_scores[i]
-                norm_score = 1.0 if max_b == min_b else (raw_score - min_b) / (max_b - min_b)
+                norm_score = (raw_score / max_b) if max_b > 0 else 0.0
                 doc = splits[i]
                 bm25_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
 
