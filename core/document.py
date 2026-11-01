@@ -1,4 +1,6 @@
 import os
+import zipfile
+import xml.etree.ElementTree as ET
 import pandas as pd
 from langchain_core.documents import Document
 from langchain_community.document_loaders import (
@@ -13,6 +15,90 @@ try:
     _HAS_OCR_LIBS = True
 except ImportError:
     _HAS_OCR_LIBS = False
+
+_DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+_DOCX_W = f"{{{_DOCX_NS['w']}}}"
+
+
+def _load_docx_by_page_breaks(file_path: str) -> list[Document]:
+    """Load DOCX text into page documents using explicit page breaks."""
+    with zipfile.ZipFile(file_path) as archive:
+        document_xml = ET.fromstring(archive.read("word/document.xml"))
+
+    body = document_xml.find("w:body", _DOCX_NS)
+    if body is None:
+        raise ValueError(f"ไม่พบเนื้อหาเอกสาร Word: {file_path}")
+
+    documents = []
+    page_number = 1
+    page_text = []
+    filename = os.path.basename(file_path)
+
+    def finish_page():
+        content = "".join(page_text).strip()
+        if content:
+            documents.append(Document(
+                page_content=content,
+                metadata={"source": filename, "page": page_number - 1},
+            ))
+
+    def start_new_page():
+        nonlocal page_number, page_text
+        finish_page()
+        page_number += 1
+        page_text = []
+
+    def iter_paragraphs(element):
+        for child in element:
+            if child.tag == f"{_DOCX_W}p":
+                yield child
+            elif child.tag == f"{_DOCX_W}tbl":
+                yield from iter_paragraphs(child)
+            else:
+                yield from iter_paragraphs(child)
+
+    for paragraph in iter_paragraphs(body):
+        paragraph_properties = paragraph.find("w:pPr", _DOCX_NS)
+        if paragraph_properties is not None and paragraph_properties.find(
+            "w:pageBreakBefore", _DOCX_NS
+        ) is not None:
+            start_new_page()
+
+        for element in paragraph.iter():
+            if element.tag == f"{_DOCX_W}t":
+                page_text.append(element.text or "")
+            elif element.tag == f"{_DOCX_W}tab":
+                page_text.append("\t")
+            elif element.tag == f"{_DOCX_W}br":
+                if element.get(f"{_DOCX_W}type") == "page":
+                    start_new_page()
+                else:
+                    page_text.append("\n")
+
+        page_text.append("\n")
+
+        section_properties = (
+            paragraph_properties.find("w:sectPr", _DOCX_NS)
+            if paragraph_properties is not None
+            else None
+        )
+        if section_properties is not None:
+            section_type = section_properties.find("w:type", _DOCX_NS)
+            break_type = (
+                section_type.get(f"{_DOCX_W}val")
+                if section_type is not None
+                else "nextPage"
+            )
+            if break_type == "nextPage":
+                start_new_page()
+            elif break_type in {"oddPage", "evenPage"}:
+                start_new_page()
+                desired_parity = 1 if break_type == "oddPage" else 0
+                if page_number % 2 != desired_parity:
+                    page_number += 1
+
+    finish_page()
+    return documents
 
 
 def _ocr_pdf(file_path: str, poppler_path: str | None, tesseract_cmd: str | None) -> list:
@@ -109,7 +195,10 @@ def load_single_file(file_path: str, poppler_path: str | None = None, tesseract_
             return _ocr_pdf(file_path, poppler_path, tesseract_cmd)
         return docs
         
-    elif ext in ['.docx', '.doc']:
+    elif ext == '.docx':
+        return _load_docx_by_page_breaks(file_path)
+
+    elif ext == '.doc':
         loader = Docx2txtLoader(file_path)
         return loader.load()
         
