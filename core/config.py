@@ -10,15 +10,15 @@ def _resolve_executable(env_key: str, exe_name: str, fallback_paths: list) -> st
     from_env = os.getenv(env_key)
     if from_env and os.path.exists(from_env):
         return from_env
-    
+
     from_path = shutil.which(exe_name)
     if from_path:
         return from_path
-    
+
     for path in fallback_paths:
         if os.path.exists(path):
             return path
-        
+
     return None # ไม่พบ - ให้ OCR fallback แจ้ง error ตอนใช้งานจริงแทนที่จะ crash ตอน import
 
 TESSERACT_CMD = _resolve_executable(
@@ -35,3 +35,11 @@ EMBEDDING_MODEL = os.getenv(
 
 SESSION_FILE = os.getenv("SESSION_FILE", "sessions.json")
 PERSIST_DIR = os.path.join(os.getcwd(), os.getenv("CHROMA_DIR", "chroma_db"))
+
+# RAG Parameters
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
+
+# LLM Parameters
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0"))
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "4096"))

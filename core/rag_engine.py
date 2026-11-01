@@ -1,20 +1,23 @@
-# core/rag_engine.py
-import os
+import torch
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import ChatOllama
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
+from core.config import CHUNK_SIZE, CHUNK_OVERLAP, LLM_TEMPERATURE, LLM_NUM_CTX
 
 class RAGEngine:
     def __init__(self, persist_dir: str, embedding_model: str):
         self.persist_dir = persist_dir
         self.embedding_model = embedding_model
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         self.embeddings = HuggingFaceEmbeddings(
             model_name=embedding_model,
-            encode_kwargs={'normalize_embeddings': True}
-            )
+            model_kwargs={'device': device},
+            encode_kwargs={'normalize_embeddings': True, 'batch_size': 32}
+        )
         self._chain_cache = {}
 
     def get_vector_db(self, session_id: str) -> Chroma:
@@ -48,9 +51,11 @@ class RAGEngine:
                       "และตอบเฉพาะจาก Context ที่ให้มาเท่านั้น ห้ามใช้ความรู้ภายนอก และถ้าผู้ใช้ถามแล้วไม่มีในข้อมูลที่ให้มา ให้ตอบตรงๆว่า ไม่พบข้อมูลในเอกสารที่ให้มา)")
         ])
 
-    def build_or_append_db(self, session_id: str, documents: list, is_append: bool = False) -> Chroma:
+    def build_or_append_db(
+        self, session_id: str, documents: list[Document], is_append: bool = False
+    ) -> tuple[Chroma, list[Document]]:
         """ทำการ Chunk และบันทึกลงฐานข้อมูล Vector"""
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         splits = splitter.split_documents(documents)
         
         if is_append:
@@ -68,6 +73,11 @@ class RAGEngine:
     def get_chain(self, model_name: str = "llama3"):
         """คอมโพส Chain ตามโมเดลที่ผู้ใช้ระบุ"""
         if model_name not in self._chain_cache:
-            llm = ChatOllama(model=model_name, temperature=0)
+            llm = ChatOllama(
+                model=model_name,
+                temperature=LLM_TEMPERATURE,
+                keep_alive="1h",
+                num_ctx=LLM_NUM_CTX
+            )
             self._chain_cache[model_name] = self.get_prompt_template() | llm | StrOutputParser()
         return self._chain_cache[model_name]

@@ -1,7 +1,8 @@
-# app.py
 import os
 import sys
 import uuid
+import heapq
+import math
 import threading
 import webview
 import json as json_lib
@@ -21,10 +22,17 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from core.document import load_single_file
 from core.rag_engine import RAGEngine
 from core.text_utils import thai_tokenize
-from core.config import TESSERACT_CMD, POPPLER_PATH, SESSION_FILE, PERSIST_DIR, EMBEDDING_MODEL
+from core.config import (
+    POPPLER_PATH,
+    SESSION_FILE,
+    PERSIST_DIR,
+    EMBEDDING_MODEL,
+    TESSERACT_CMD,
+)
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 sessions = {}
+sessions_lock = threading.Lock()  # ป้องกัน race condition เมื่อหลาย thread อ่าน/เขียน sessions dict พร้อมกัน
 
 # เรียกใช้อินสแตนซ์ของ RAG Engine
 rag = RAGEngine(persist_dir=PERSIST_DIR, embedding_model=EMBEDDING_MODEL)
@@ -56,10 +64,15 @@ def get_page_number(metadata):
 
 # ==================== SESSION MANAGEMENT ====================
 def save_sessions():
-    data_to_save = {
-        sid: {"filenames": sdata["filenames"], "chat_history": messages_to_dict(sdata["chat_history"])}
-        for sid, sdata in sessions.items() if sdata["status"] == "ready"
-    }
+    with sessions_lock:
+        data_to_save = {
+            sid: {
+                "filenames": sdata["filenames"],
+                "chat_history": messages_to_dict(sdata["chat_history"]),
+                "tokenized_corpus": sdata.get("tokenized_corpus", [])
+            }
+            for sid, sdata in sessions.items() if sdata["status"] == "ready"
+        }
     with open(SESSION_FILE, "w", encoding="utf-8") as f:
         json_lib.dump(data_to_save, f, ensure_ascii=False, indent=4)
 
@@ -75,14 +88,25 @@ def load_sessions():
                 try:
                     ch_data = vector_db.get()
                     splits = [
-                        Document(page_content=doc, metadata=meta)
+                        Document(
+                            page_content=doc,
+                            metadata={
+                                **meta,
+                                "filename": meta.get("filename")
+                                or os.path.basename(str(meta.get("source") or "")),
+                            },
+                        )
                         for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
                     ]
-                    tokenized_corpus = [thai_tokenize(d.page_content) for d in splits]
-                    bm25 = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
+                    # ใช้แคช tokenized_corpus เดิมหากมีเพื่อความรวดเร็วในการเปิดโปรแกรม
+                    tokenized_corpus = sdata.get("tokenized_corpus")
+                    if not tokenized_corpus and splits:
+                        tokenized_corpus = [thai_tokenize(d.page_content) for d in splits]
+                    bm25 = BM25Okapi(tokenized_corpus) if any(tokenized_corpus) else None
                 except Exception as e:
                     print(f"ไม่สามารถดึงข้อมูล Chroma สำหรับ Session {sid}: {e}")
                     splits = []
+                    tokenized_corpus = []
                     bm25 = None
 
                 sessions[sid] = {
@@ -91,19 +115,23 @@ def load_sessions():
                     "chat_history": messages_from_dict(sdata["chat_history"]),
                     "vector_db": vector_db,
                     "bm25": bm25,
-                    "splits": splits
+                    "splits": splits,
+                    "tokenized_corpus": tokenized_corpus
                 }
     except Exception as e:
         print(f"ไม่สามารถโหลดประวัติเดิมได้: {e}")
 
 # ==================== BACKGROUND TASK ====================
 def build_rag_task(file_paths: list, session_id: str, is_append: bool):
-    sessions[session_id]["status"] = "loading"
+    with sessions_lock:
+        sessions[session_id]["status"] = "loading"
     try:
         all_docs = []
         for file_path in file_paths:
             try:
                 docs = load_single_file(file_path, POPPLER_PATH, TESSERACT_CMD)
+                for doc in docs:
+                    doc.metadata["filename"] = os.path.basename(file_path)
                 # กรอง Document ที่ content ว่างเปล่าทิ้ง (เช่น หน้าที่ OCR แล้วไม่เจอตัวอักษรเลย)
                 # ไม่งั้น all_docs จะดู "ไม่ว่าง" ทั้งที่ไม่มีเนื้อหาจริง แล้วไปพังตอน Chroma upsert แทน
                 docs = [d for d in docs if d.page_content.strip()] if docs else []
@@ -117,28 +145,38 @@ def build_rag_task(file_paths: list, session_id: str, is_append: bool):
             return
 
         # 1. บันทึกลงฐานข้อมูล Vector เสมอ
-        vector_db, _ = rag.build_or_append_db(session_id, all_docs, is_append=is_append)
+        vector_db, new_splits = rag.build_or_append_db(session_id, all_docs, is_append=is_append)
         
-        # 2. ดึงข้อมูล Chunk ทั้งหมด (รวมของเก่า + ของใหม่) จากฐานข้อมูลมาทำดัชนี BM25
-        ch_data = vector_db.get()
-        all_splits = [
-            Document(page_content=doc, metadata=meta)
-            for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
-        ]
+        # 2. จัดการ Chunk และ BM25 (ถ้าเป็นการเพิ่มไฟล์ต่อ ให้ tokenize เฉพาะไฟล์ใหม่เพื่อประหยัดเวลา)
+        if is_append and sessions[session_id].get("splits") and sessions[session_id].get("tokenized_corpus"):
+            old_splits = sessions[session_id]["splits"]
+            old_corpus = sessions[session_id]["tokenized_corpus"]
+            new_corpus = [thai_tokenize(doc.page_content) for doc in new_splits]
+            all_splits = old_splits + new_splits
+            tokenized_corpus = old_corpus + new_corpus
+        else:
+            ch_data = vector_db.get()
+            all_splits = [
+                Document(page_content=doc, metadata=meta)
+                for doc, meta in zip(ch_data['documents'], ch_data['metadatas'])
+            ]
+            tokenized_corpus = [thai_tokenize(doc.page_content) for doc in all_splits]
         
-        tokenized_corpus = [thai_tokenize(doc.page_content) for doc in all_splits]
-        bm25 = BM25Okapi(tokenized_corpus)
+        bm25 = BM25Okapi(tokenized_corpus) if any(tokenized_corpus) else None
 
         # 3. อัปเดตคีย์โครงสร้างใหม่ลงใน Session ให้ครบถ้วนและสอดคล้องกับ api_ask
-        sessions[session_id].update({
-            "vector_db": vector_db,
-            "bm25": bm25,
-            "splits": all_splits,
-            "status": "ready"
-        })
+        with sessions_lock:
+            sessions[session_id].update({
+                "vector_db": vector_db,
+                "bm25": bm25,
+                "splits": all_splits,
+                "tokenized_corpus": tokenized_corpus,
+                "status": "ready"
+            })
         save_sessions()
     except Exception as e:
-        sessions[session_id]["status"] = f"error: {str(e)}"
+        with sessions_lock:
+            sessions[session_id]["status"] = f"error: {str(e)}"
 
 # ==================== FLASK ROUTES ====================
 @app.route("/")
@@ -159,15 +197,19 @@ def api_delete_sessions(session_id):
 
 @app.route("/api/load", methods=["POST"])
 def api_load():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "ข้อมูลคำขอไม่ถูกต้อง"}), 400
     paths, session_id = data.get("paths", []), data.get("session_id")
-    supported_ext = ['.pdf', '.doc', '.docx', '.txt', '.xls', '.xlsx']
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        return jsonify({"ok": False, "error": "รายการไฟล์ไม่ถูกต้อง"}), 400
+    supported_ext = ['.pdf', '.docx', '.txt', '.csv', '.xls', '.xlsx']
     
     files_to_process = [f for f in paths if os.path.exists(f) and os.path.splitext(f)[1].lower() in supported_ext]
     if not files_to_process: return jsonify({"ok": False, "error": "ไม่พบไฟล์เอกสารที่รองรับ"}), 400
 
     is_append = False
-    if session_id and session_id in sessions:
+    if isinstance(session_id, str) and session_id in sessions:
         is_append = True
         files_to_process = [f for f in files_to_process if os.path.basename(f) not in sessions[session_id]["filenames"]]
         if not files_to_process: return jsonify({"ok": False, "error": "ไฟล์ถูกเพิ่มไปแล้ว"}), 400
@@ -198,13 +240,23 @@ def api_history(session_id):
 
 @app.route("/api/ask", methods=["POST"])
 def api_ask():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "ข้อมูลคำขอไม่ถูกต้อง"}), 400
     session_id, query, model_name = data.get("session_id"), data.get("query"), data.get("model", "llama3")
+    if not isinstance(session_id, str) or not session_id:
+        return jsonify({"ok": False, "error": "ไม่พบ Session"}), 400
+    if not isinstance(query, str) or not query.strip():
+        return jsonify({"ok": False, "error": "กรุณาพิมพ์คำถาม"}), 400
+    if not isinstance(model_name, str) or not model_name:
+        return jsonify({"ok": False, "error": "รุ่นโมเดลไม่ถูกต้อง"}), 400
 
     # ===== รับค่า Weight จาก Slider ของ frontend ===
     try:
         vec_weight = float(data.get("vec_weight", 0.7))
     except (TypeError, ValueError):
+        vec_weight = 0.7
+    if not math.isfinite(vec_weight):
         vec_weight = 0.7
     vec_weight = max(0.0, min(1.0, vec_weight)) #กันค่าเพี้ยนนอกช่วง 0-1
     bm25_weight = 1.0 - vec_weight
@@ -220,9 +272,6 @@ def api_ask():
         bm25 = sessions[session_id]["bm25"]
         splits = sessions[session_id]["splits"]
 
-        if bm25 is None:
-            return jsonify({"ok": False, "error": "ยังไม่มีดัชนีค้นหาสำหรับ Session นี้"}), 400
-
         # ===== ส่วน Retrieval เหมือนเดิมทุกอย่าง ทำให้เสร็จก่อน stream =====
         vec_result = vector_db.similarity_search_with_score(query, k=10)
         vec_scores_map = {}
@@ -234,8 +283,11 @@ def api_ask():
                 vec_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
 
         tokenized_query = thai_tokenize(query)
-        bm25_all_scores = bm25.get_scores(tokenized_query)
-        top_10_idx = sorted(range(len(bm25_all_scores)), key=lambda i: bm25_all_scores[i], reverse=True)[:10]
+        bm25_all_scores = bm25.get_scores(tokenized_query) if bm25 is not None else []
+        top_10_idx = (
+            heapq.nlargest(10, range(len(bm25_all_scores)), key=lambda i: bm25_all_scores[i])
+            if len(bm25_all_scores) > 0 else []
+        )
         bm25_scores_map = {}
         if top_10_idx:
             bm25_top_scores = [bm25_all_scores[i] for i in top_10_idx]
@@ -247,30 +299,31 @@ def api_ask():
                 bm25_scores_map[doc.page_content] = {"doc": doc, "score": norm_score}
 
         w_vec, w_bm25 = vec_weight, bm25_weight
-        
+
         hybrid_result = []
-        all_contents = set(vec_scores_map.keys()).union(set(bm25_scores_map.keys()))
+        all_contents = dict.fromkeys((*vec_scores_map, *bm25_scores_map))
         for content in all_contents:
             v_data = vec_scores_map.get(content, {"score": 0.0, "doc": None})
             b_data = bm25_scores_map.get(content, {"score": 0.0, "doc": None})
             actual_doc = v_data["doc"] if v_data["doc"] else b_data["doc"]
             final_score = (w_vec * v_data["score"]) + (w_bm25 * b_data["score"])
             hybrid_result.append((actual_doc, final_score))
-        hybrid_result.sort(key=lambda x: x[1], reverse=True)
-        # ตัด chunk ที่ score ต่ำกว่า threshold ทิ้งก่อน ไม่ใช่แค่เอา top-6 มาเสมอเหมือนเดิม
-        # ป้องกันไม่ให้ context เต็มไปด้วยเนื้อหาที่ไม่เกี่ยวข้องเลยตอนคำถามไม่มีคำตอบในเอกสาร
-        top_docs = [item for item in hybrid_result[:6] if item[1] >= RELEVANCE_THRESHOLD]
+
+        # ใช้ heapq.nlargest เพื่อเลือกเฉพาะ Top 6 ที่ดีที่สุด O(N log K) แทนการ sort ทั้งหมด O(N log N)
+        top_candidates = heapq.nlargest(6, hybrid_result, key=lambda x: x[1])
+        top_docs = [item for item in top_candidates if item[1] >= RELEVANCE_THRESHOLD]
 
         if top_docs:
             context = "\n\n".join([
-                f"[ข้อมูลจาก ไฟล์: {doc.metadata.get('filename', 'ไม่ระบุ')} หน้าที่: {get_page_number(doc.metadata)}]:\n{doc.page_content}" 
-                for doc, score in top_docs
+                f"[ข้อมูลจาก ไฟล์: {item[0].metadata.get('filename', 'ไม่ระบุ')} "
+                f"หน้าที่: {get_page_number(item[0].metadata)}]:\n{item[0].page_content}"
+                for item in top_docs
             ])
         else:
             # ไม่มี chunk ไหนผ่านเกณฑ์เลย บอก LLM ตรง ๆ แทนที่จะส่ง context ว่างเปล่าไปเฉย ๆ
             # (context ว่างเปล่าอาจทำให้โมเดลบางตัวเผลอใช้ความรู้ทั่วไปตอบแทน)
             context = "(ไม่พบข้อมูลที่เกี่ยวข้องเพียงพอในเอกสารสำหรับคำถามนี้)"
-        pages = sorted(list(set(get_page_number(doc.metadata) for doc, score in top_docs)))
+        pages = sorted({get_page_number(item[0].metadata) for item in top_docs})
         chunks = [{
             "content": doc.page_content,
             "page": get_page_number(doc.metadata),

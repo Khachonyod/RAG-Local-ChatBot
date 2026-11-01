@@ -1,0 +1,36 @@
+# Virtual environment
+.venv/
+
+# Database
+chroma_db/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Session data
+sessions.json
+
+# Environment secrets
+.env
+
+# Logs
+*.log
+
+# OS files
+desktop.ini
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+dist/
+build/
+*.spec
+
+# Misc
+requests.http

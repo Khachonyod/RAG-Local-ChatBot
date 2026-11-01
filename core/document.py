@@ -5,16 +5,28 @@ import pandas as pd
 from langchain_core.documents import Document
 from langchain_community.document_loaders import (
     PyPDFLoader,
-    Docx2txtLoader,
     TextLoader
 )
 
 try:
-    from pdf2image import convert_from_path
-    import pytesseract
-    _HAS_OCR_LIBS = True
+    import pypdfium2 as pdfium
+    _HAS_PDFIUM = True
 except ImportError:
-    _HAS_OCR_LIBS = False
+    _HAS_PDFIUM = False
+
+try:
+    import pytesseract
+    _HAS_TESSERACT = True
+except ImportError:
+    _HAS_TESSERACT = False
+
+try:
+    from pdf2image import convert_from_path
+    _HAS_PDF2IMAGE = True
+except ImportError:
+    _HAS_PDF2IMAGE = False
+
+from core.config import TESSERACT_CMD
 
 _DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 _DOCX_W = f"{{{_DOCX_NS['w']}}}"
@@ -101,38 +113,86 @@ def _load_docx_by_page_breaks(file_path: str) -> list[Document]:
     return documents
 
 
-def _ocr_pdf(file_path: str, poppler_path: str | None, tesseract_cmd: str | None) -> list:
+def _ocr_pdf(
+    file_path: str,
+    poppler_path: str | None = None,
+    tesseract_cmd: str | None = None,
+) -> list:
     """
-    OCR ไฟล์ PDF ที่เป็นภาพสแกน (ไม่มี text layer ให้ PyPDFLoader ดึงได้)
-    แปลงแต่ละหน้าเป็นรูปภาพด้วย pdf2image (ต้องใช้ Poppler) แล้วอ่านตัวอักษรด้วย pytesseract
+    OCR ไฟล์ PDF ที่เป็นภาพสแกน (ไม่มี text layer ให้ตัวอ่าน PDF ดึงได้)
+    ใช้ Tesseract OCR สำหรับภาษาไทยและอังกฤษ
+    ลำดับการแปลง PDF เป็นรูปภาพ:
+    1) ใช้ pypdfium2 (เร็วกว่า ไม่ต้องลงโปรแกรม Poppler ภายนอก)
+    2) Fallback ไปใช้ pdf2image
     """
-    if not _HAS_OCR_LIBS:
+    tesseract_cmd = tesseract_cmd or TESSERACT_CMD
+    if not _HAS_TESSERACT:
         raise RuntimeError(
-            "ไฟล์นี้เป็น PDF แบบภาพสแกน (ไม่มี text layer) แต่ไม่พบไลบรารีสำหรับ OCR "
-            "กรุณาติดตั้งด้วย: pip install pdf2image pytesseract"
+            "ไม่พบไลบรารี pytesseract กรุณาติดตั้งด้วย: pip install pytesseract"
         )
     if not tesseract_cmd:
         raise RuntimeError(
-            "ไฟล์นี้เป็น PDF แบบภาพสแกน ต้องใช้ Tesseract OCR แต่ไม่พบโปรแกรม Tesseract ในเครื่อง "
-            "กรุณาติดตั้งและตั้งค่า TESSERACT_CMD ใน .env"
+            "ไฟล์นี้เป็น PDF แบบภาพสแกน ต้องใช้ Tesseract OCR แต่ไม่พบโปรแกรม "
+            "Tesseract ในเครื่อง กรุณาติดตั้งและตั้งค่า TESSERACT_CMD ใน .env"
         )
+
+    images = []
+
+    # 1. ลองใช้ pypdfium2 แปลงหน้า PDF เป็นภาพก่อน (ไม่ต้องพึ่งพา Poppler)
+    if _HAS_PDFIUM:
+        pdf = None
+        try:
+            pdf = pdfium.PdfDocument(file_path)
+            for page_idx in range(len(pdf)):
+                page = pdf[page_idx]
+                # scale=2.0 ให้ resolution ~144 DPI เหมาะกับ OCR กำลังดี
+                pil_image = page.render(scale=2.0).to_pil()
+                images.append((page_idx, pil_image))
+                page.close()
+        except Exception as e:
+            print(f"[WARNING] แปลง PDF ด้วย pypdfium2 ไม่สำเร็จ ({e}) — สลับไปใช้ pdf2image")
+            images = []
+        finally:
+            if pdf is not None:
+                pdf.close()
+
+    # 2. Fallback ใช้ pdf2image
+    if not images and _HAS_PDF2IMAGE:
+        convert_kwargs = {"poppler_path": poppler_path} if poppler_path else {}
+        try:
+            pil_images = convert_from_path(file_path, **convert_kwargs)
+            images = [(idx, img) for idx, img in enumerate(pil_images)]
+        except Exception as e:
+            raise RuntimeError(
+                f"ไม่สามารถแปลงหน้า PDF เป็นรูปภาพเพื่อทำ OCR ได้ ({e}) "
+                "หากใช้ Windows กรุณาตั้งค่า POPPLER_PATH ใน .env"
+            )
+
+    if not images:
+        raise RuntimeError("ไม่สามารถดึงรูปภาพจากหน้า PDF เพื่อทำ OCR ได้")
+
     pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-
-    convert_kwargs = {"poppler_path": poppler_path} if poppler_path else {}
-    images = convert_from_path(file_path, **convert_kwargs)
-
     documents = []
-    for i, image in enumerate(images):
-        text = pytesseract.image_to_string(image, lang="tha+eng")
-        if text.strip():
+    filename = os.path.basename(file_path)
+
+    for page_idx, image in images:
+        text = pytesseract.image_to_string(image, lang="tha+eng").strip()
+        if text:
             documents.append(Document(
                 page_content=text,
-                metadata={"source": os.path.basename(file_path), "page": i}
+                metadata={"source": filename, "page": page_idx}
             ))
+
     return documents
 
 
-def load_single_file(file_path: str, poppler_path: str | None = None, tesseract_cmd: str | None = None):
+def load_single_file(
+    file_path: str,
+    poppler_path: str | None = None,
+    tesseract_cmd: str | None = None,
+    *args,
+    **kwargs,
+):
     """
     ฟังก์ชันสำหรับโหลดและแปลงไฟล์เอกสารต่างๆ ให้อยู่ในรูปแบบ Document Object
     รองรับ: .csv, .xlsx, .xls, .pdf, .docx, .txt
@@ -184,23 +244,45 @@ def load_single_file(file_path: str, poppler_path: str | None = None, tesseract_
     # 2. จัดการไฟล์เอกสารทั่วไป (PDF, Word, Text)
     # ---------------------------------------------------------
     elif ext == '.pdf':
-        loader = PyPDFLoader(file_path)
-        docs = loader.load()
+        docs = []
+        if _HAS_PDFIUM:
+            pdf = None
+            try:
+                pdf = pdfium.PdfDocument(file_path)
+                filename = os.path.basename(file_path)
+                for page_idx in range(len(pdf)):
+                    page = pdf[page_idx]
+                    text_page = page.get_textpage()
+                    text = text_page.get_text_range()
+                    text_page.close()
+                    page.close()
+                    if text.strip():
+                        docs.append(Document(
+                            page_content=text,
+                            metadata={"source": filename, "page": page_idx}
+                        ))
+            except Exception as e:
+                print(f"[WARNING] อ่าน PDF ด้วย pypdfium2 ไม่สำเร็จ ({e}) — สลับไปใช้ PyPDFLoader")
+                docs = []
+            finally:
+                if pdf is not None:
+                    pdf.close()
 
-        # PyPDFLoader ดึงได้แค่ text layer ที่มีอยู่แล้วในไฟล์ PDF เท่านั้น
-        # ถ้าไฟล์เป็น PDF แบบภาพสแกน (ไม่มี text layer) จะได้ page_content ว่างเปล่าทุกหน้า
-        # ซึ่งถ้าปล่อยผ่านไปตรงๆ splitter จะไม่มี chunk ให้ embed เลย ทำให้ Chroma error ตอน upsert
+        if not docs:
+            loader = PyPDFLoader(file_path)
+            docs = loader.load()
+
         has_text = any(d.page_content.strip() for d in docs)
         if not has_text:
-            return _ocr_pdf(file_path, poppler_path, tesseract_cmd)
+            return _ocr_pdf(
+                file_path,
+                poppler_path=poppler_path,
+                tesseract_cmd=tesseract_cmd,
+            )
         return docs
         
     elif ext == '.docx':
         return _load_docx_by_page_breaks(file_path)
-
-    elif ext == '.doc':
-        loader = Docx2txtLoader(file_path)
-        return loader.load()
         
     elif ext == '.txt':
         loader = TextLoader(file_path, encoding='utf-8')

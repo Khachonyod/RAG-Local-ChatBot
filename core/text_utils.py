@@ -37,11 +37,23 @@ def _warn_once():
     return True
 
 
+@lru_cache(maxsize=8192)
+def _cached_thai_tokenize(text: str) -> tuple[str, ...]:
+    tokens = _pythai_word_tokenize(text, engine="newmm", keep_whitespace=False)
+    cleaned = []
+    for tok in tokens:
+        tok = _WHITESPACE_RE.sub("", tok)
+        if tok and tok not in _THAI_STOPWORDS:
+            cleaned.append(tok.lower())
+    return tuple(cleaned)
+
+
 def thai_tokenize(text: str) -> list[str]:
     """
     ตัดคำข้อความ (ไทยผสมอังกฤษ) ให้เหมาะกับการทำ BM25 index/query
 
     ใช้ฟังก์ชันนี้แทน text.split() ทุกจุดที่เคยใช้ตอนสร้าง/ค้น BM25 corpus
+    มีระบบ LRU Cache เพื่อลดเวลาการตัดคำซ้ำซ้อน
     """
     if not text:
         return []
@@ -50,15 +62,4 @@ def thai_tokenize(text: str) -> list[str]:
         _warn_once()
         return text.split()
 
-    tokens = _pythai_word_tokenize(text, engine="newmm", keep_whitespace=False)
-
-    cleaned = []
-    for tok in tokens:
-        tok = _WHITESPACE_RE.sub("", tok)
-        if not tok:
-            continue
-        if tok in _THAI_STOPWORDS:
-            continue
-        cleaned.append(tok.lower())
-
-    return cleaned
+    return list(_cached_thai_tokenize(text))
